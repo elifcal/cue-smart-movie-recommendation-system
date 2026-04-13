@@ -3,7 +3,7 @@ import axios from "axios";
 import SearchBar from "./components/SearchBar";
 import MovieCard from "./components/MovieCard";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_URL;
 const TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
 
 function App() {
