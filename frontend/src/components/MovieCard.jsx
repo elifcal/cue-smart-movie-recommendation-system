@@ -1,3 +1,5 @@
+import EmojiCurve from "./EmojiCurve";
+
 function MovieCard({ movie }) {
   const palette = Array.isArray(movie.color_palette) ? movie.color_palette : [];
   const hasPoster = Boolean(movie.poster_url);
@@ -27,6 +29,8 @@ function MovieCard({ movie }) {
         <p style={styles.rating}>⭐ {movie.vote_average}</p>
         <p style={styles.text}>{movie.overview}</p>
         <p style={styles.why}>{movie.why_text}</p>
+
+        <EmojiCurve curve={movie.emotion_curve} />
 
         {palette.length > 0 && (
           <div style={styles.paletteWrapper}>
