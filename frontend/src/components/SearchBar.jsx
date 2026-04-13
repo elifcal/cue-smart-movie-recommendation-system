@@ -6,7 +6,7 @@ const exampleQueries = [
   "twist sonlu film",
 ];
 
-function SearchBar({ onSearch }) {
+function SearchBar({ onSearch, loading }) {
   const [query, setQuery] = useState("");
 
   const handleSubmit = (e) => {
@@ -28,9 +28,10 @@ function SearchBar({ onSearch }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           style={styles.input}
+          disabled={loading}
         />
-        <button type="submit" style={styles.button}>
-          Ara
+        <button type="submit" style={styles.button} disabled={loading}>
+          {loading ? "Aranıyor..." : "Ara"}
         </button>
       </form>
 
@@ -43,6 +44,7 @@ function SearchBar({ onSearch }) {
               type="button"
               style={styles.exampleButton}
               onClick={() => handleExampleClick(example)}
+              disabled={loading}
             >
               {example}
             </button>

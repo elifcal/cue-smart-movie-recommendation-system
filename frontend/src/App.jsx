@@ -10,6 +10,8 @@ function App() {
   const [healthStatus, setHealthStatus] = useState("Kontrol ediliyor...");
   const [movies, setMovies] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [hasSearched, setHasSearched] = useState(false);
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -28,13 +30,19 @@ function App() {
     if (!query.trim()) return;
 
     setLoading(true);
+    setErrorMessage("");
+    setHasSearched(true);
 
     try {
       const response = await axios.get(`${API_BASE_URL}/search`, {
         params: { q: query },
       });
 
-      const formattedMovies = response.data.results.map((movie) => ({
+      const results = Array.isArray(response.data.results)
+        ? response.data.results
+        : [];
+
+      const formattedMovies = results.map((movie) => ({
         ...movie,
         tmdb_id: movie.id,
         poster_url: movie.poster_path
@@ -43,9 +51,14 @@ function App() {
       }));
 
       setMovies(formattedMovies);
+
+      if (formattedMovies.length === 0) {
+        setErrorMessage("Sonuç bulunamadı.");
+      }
     } catch (error) {
       console.error("Search error:", error);
       setMovies([]);
+      setErrorMessage("Arama sırasında bir hata oluştu.");
     } finally {
       setLoading(false);
     }
@@ -56,14 +69,18 @@ function App() {
       <h1 style={styles.title}>Cue Smart Movie Recommendation</h1>
       <p style={styles.status}>API Durumu: {healthStatus}</p>
 
-      <SearchBar onSearch={handleSearch} />
+      <SearchBar onSearch={handleSearch} loading={loading} />
 
-      {loading && <p style={styles.message}>Filmler yükleniyor...</p>}
-
-      {!loading && movies.length === 0 && (
+      {!hasSearched && !loading && !errorMessage && (
         <p style={styles.message}>
           Arama yaparak backend’den gerçek sonuçları getir.
         </p>
+      )}
+
+      {loading && <p style={styles.message}>Filmler yükleniyor...</p>}
+
+      {!loading && errorMessage && (
+        <p style={styles.errorMessage}>{errorMessage}</p>
       )}
 
       <div style={styles.grid}>
@@ -96,6 +113,13 @@ const styles = {
     color: "#d1d5db",
     marginTop: "20px",
     marginBottom: "20px",
+  },
+  errorMessage: {
+    textAlign: "center",
+    color: "#fca5a5",
+    marginTop: "20px",
+    marginBottom: "20px",
+    fontWeight: "600",
   },
   grid: {
     display: "grid",
