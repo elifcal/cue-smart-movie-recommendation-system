@@ -1,4 +1,5 @@
 import EmojiCurve from "./EmojiCurve";
+import FeedbackButtons from "./FeedbackButtons";
 
 function MovieCard({ movie }) {
   const palette = Array.isArray(movie.color_palette) ? movie.color_palette : [];
@@ -46,6 +47,8 @@ function MovieCard({ movie }) {
             </div>
           </div>
         )}
+
+        <FeedbackButtons filmId={movie.tmdb_id} />
       </div>
     </div>
   );
