@@ -63,3 +63,39 @@ def konusma_orani(transkript, mp3_yolu, sure=60):
     kelime_sayisi = len(transkript.split())
     oran = min(kelime_sayisi / (sure * 2), 1.0)
     return round(oran, 3)
+# Anahtar kelime listesi
+ANAHTAR_KELIMELER = {
+    "korku":   ["death", "kill", "dark", "fear", "monster", "run", "scream",
+                "demon", "hell", "terrifying", "survive", "entity", "banish",
+                "ghost", "horror", "evil", "curse", "haunted",
+                "ölüm", "karanlık", "korku", "kaç", "canavar"],
+    "gerilim": ["secret", "mystery", "danger", "threat", "escape", "trap",
+                "freeze", "command", "control",
+                "gizem", "tehlike", "tuzak", "kaçış"],
+    "heyecan": ["fight", "battle", "war", "explosion", "chase", "hero",
+                "savaş", "patlama", "kahraman", "dövüş"],
+    "dram":    ["love", "life", "family", "hope", "dream", "loss",
+                "aşk", "umut", "aile", "kayıp"],
+    "komedi":  ["funny", "laugh", "crazy", "weird", "stupid",
+                "komik", "gülünç", "saçma"],
+}
+
+def anahtar_kelime_cikar(transkript):
+    transkript_lower = transkript.lower()
+    bulunanlar = {}
+    for kategori, kelimeler in ANAHTAR_KELIMELER.items():
+        eslesen = [k for k in kelimeler if k in transkript_lower]
+        if eslesen:
+            bulunanlar[kategori] = eslesen
+    return bulunanlar
+
+def konusma_orani_hesapla(mp3_yolu):
+    model = whisper.load_model("base")
+    sonuc = model.transcribe(mp3_yolu, verbose=False)
+    segmentler = sonuc.get("segments", [])
+    if not segmentler:
+        return 0.0
+    toplam_sure = segmentler[-1]["end"]
+    konusma_suresi = sum(s["end"] - s["start"] for s in segmentler)
+    oran = konusma_suresi / toplam_sure if toplam_sure > 0 else 0
+    return round(oran, 3)
