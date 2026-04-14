@@ -6,6 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL;
 function FeedbackButtons({ filmId }) {
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
+  const [selectedAction, setSelectedAction] = useState("");
 
   const sendFeedback = async (action) => {
     if (!filmId) return;
@@ -21,7 +22,15 @@ function FeedbackButtons({ filmId }) {
         },
       });
 
-      setStatus(action === "like" ? "Beğeni gönderildi" : "Beğenmeme gönderildi");
+      setSelectedAction(action);
+
+      if (action === "like") {
+        setStatus("Beğeni gönderildi");
+      } else if (action === "dislike") {
+        setStatus("Beğenmeme gönderildi");
+      } else if (action === "watched") {
+        setStatus("İzlendi olarak işaretlendi");
+      }
     } catch (error) {
       console.error("Feedback error:", error);
       setStatus("Geri bildirim gönderilemedi");
@@ -36,7 +45,11 @@ function FeedbackButtons({ filmId }) {
 
       <div style={styles.row}>
         <button
-          style={styles.likeButton}
+          style={{
+            ...styles.button,
+            ...styles.likeButton,
+            ...(selectedAction === "like" ? styles.selectedButton : {}),
+          }}
           onClick={() => sendFeedback("like")}
           disabled={loading}
         >
@@ -44,11 +57,27 @@ function FeedbackButtons({ filmId }) {
         </button>
 
         <button
-          style={styles.dislikeButton}
+          style={{
+            ...styles.button,
+            ...styles.dislikeButton,
+            ...(selectedAction === "dislike" ? styles.selectedButton : {}),
+          }}
           onClick={() => sendFeedback("dislike")}
           disabled={loading}
         >
           👎 Beğenmedim
+        </button>
+
+        <button
+          style={{
+            ...styles.button,
+            ...styles.watchedButton,
+            ...(selectedAction === "watched" ? styles.selectedButton : {}),
+          }}
+          onClick={() => sendFeedback("watched")}
+          disabled={loading}
+        >
+          👀 Zaten İzledim
         </button>
       </div>
 
@@ -71,23 +100,28 @@ const styles = {
     gap: "10px",
     flexWrap: "wrap",
   },
-  likeButton: {
+  button: {
     padding: "10px 14px",
     borderRadius: "10px",
-    border: "none",
+    border: "1px solid transparent",
     cursor: "pointer",
-    background: "#16a34a",
     color: "white",
     fontWeight: "600",
+    transition: "all 0.2s ease",
+  },
+  likeButton: {
+    background: "#16a34a",
   },
   dislikeButton: {
-    padding: "10px 14px",
-    borderRadius: "10px",
-    border: "none",
-    cursor: "pointer",
     background: "#dc2626",
-    color: "white",
-    fontWeight: "600",
+  },
+  watchedButton: {
+    background: "#2563eb",
+  },
+  selectedButton: {
+    border: "1px solid rgba(255,255,255,0.8)",
+    boxShadow: "0 0 0 3px rgba(255,255,255,0.12)",
+    transform: "translateY(-1px)",
   },
   status: {
     marginTop: "10px",
