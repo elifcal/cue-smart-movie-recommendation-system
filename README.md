@@ -1,3 +1,4 @@
+# Cue Smart Movie Recommendation System
 ## Frontend
 
 Frontend tarafı React + Vite ile geliştirilmiştir. Kullanıcının yazdığı doğal dil girdisini backend'e gönderir ve dönen film önerilerini kart yapısında gösterir.
