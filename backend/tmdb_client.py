@@ -60,7 +60,7 @@ def get_movie_full_details(movie_id):
         return None
 
 # --- GÜN 4: 100 FİLMLİK TEST JSON (SADECE 6 ALAN) ---
-#def prepare_person_b_json(limit=100):
+def prepare_person_b_json(limit=100):
     """Kişi B'nin ML testi için istediği 6 alanlı 100 Türkçe film hazırlar."""
     api_key = os.getenv("TMDB_API_KEY")
     final_data = []
@@ -97,20 +97,6 @@ def get_movie_full_details(movie_id):
     print(f"\n🚀 Tertemiz 100 filmlik JSON hazır!")
 
 # --- ANA ÇALIŞTIRMA ---
-#if __name__ == "__main__":
-    #  JSON'u hazırla
-    prepare_person_b_json(limit=100)
-
-def test_elif_connection():
-    try:
-        # Elif'in docs sayfası genelde açıktır
-        response = requests.get("http://127.0.0.1:8000/docs")
-        if response.status_code == 200:
-            print("✅ BAŞARILI: Elif'in backend'i ile senin TMDB istemcin el sıkıştı!")
-        else:
-            print(f"⚠️ Sunucu açık ama beklenmedik bir yanıt verdi: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Bağlantı başarısız: {e}")
-
 if __name__ == "__main__":
-    test_elif_connection()
+    #  JSON'u hazırla
+    #prepare_person_b_json(limit=100)
