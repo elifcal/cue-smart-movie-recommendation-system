@@ -154,3 +154,43 @@ def konusma_orani_hesapla(mp3_yolu):
     except Exception as e:
         print(f"❌ Konuşma oranı hatası ({mp3_yolu}): {e}")
         return 0.0
+# Tüm ses analizini tek fonksiyonda çalıştır
+def analyze_audio(mp3_yolu, sure=60):
+    """
+    Tek fonksiyonla tüm ses analizini yapar.
+    Döndürür: text, tempo, energy, emotion_curve, speech_ratio
+    """
+    if mp3_yolu is None or not os.path.exists(mp3_yolu):
+        print(f"⚠️ Dosya bulunamadı: {mp3_yolu}")
+        return None
+
+    print(f"🎵 Analiz başlıyor: {mp3_yolu}")
+
+    model = whisper.load_model("base")
+    sonuc = model.transcribe(mp3_yolu, verbose=False)
+    text = sonuc["text"]
+    segmentler = sonuc.get("segments", [])
+
+    y, sr = librosa.load(mp3_yolu, duration=sure)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = round(float(np.atleast_1d(tempo)[0]), 1)
+
+    energy = round(float(np.mean(librosa.feature.rms(y=y))), 4)
+
+    parcalar = np.array_split(y, 10)
+    emotion_curve = [float(np.mean(librosa.feature.rms(y=p))) for p in parcalar]
+
+    if segmentler:
+        toplam_sure = segmentler[-1]["end"]
+        konusma_suresi = sum(s["end"] - s["start"] for s in segmentler)
+        speech_ratio = round(konusma_suresi / toplam_sure if toplam_sure > 0 else 0, 3)
+    else:
+        speech_ratio = 0.0
+
+    return {
+        "text": text,
+        "tempo": tempo,
+        "energy": energy,
+        "emotion_curve": emotion_curve,
+        "speech_ratio": speech_ratio,
+    }
