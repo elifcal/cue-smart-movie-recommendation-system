@@ -98,5 +98,5 @@ def prepare_person_b_json(limit=100):
 
 # --- ANA ÇALIŞTIRMA ---
 if __name__ == "__main__":
-    #  JSON'u hazırla
-    #prepare_person_b_json(limit=100)
+#  JSON'u hazırla
+#prepare_person_b_json(limit=100)
