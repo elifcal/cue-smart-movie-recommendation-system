@@ -152,7 +152,7 @@
             35,
             18
         ],
-        "vote_average": 5.3,
+        "vote_average": 5.313,
         "release_date": "2026-04-06"
     },
     {
@@ -345,17 +345,6 @@
         "release_date": "2026-02-11"
     },
     {
-        "id": 1266127,
-        "title": "Saklambaç 2",
-        "overview": "Le Domas ailesinin ölümcül saldırısından sağ kurtulan Grace, kabus dolu oyunun henüz bitmediğini fark eder. Artık çok daha büyük ve tehlikeli bir mücadelenin içindedir. Bu kez yanında yıllardır görüşmediği kız kardeşi Faith vardır. Grace'in amacı yalnızca hayatta kalmak değildir; kız kardeşini korumak ve dünyayı kontrol eden Konsey'in \"Yüksek Koltuğu\"nu ele geçirmek zorundadır. Ancak taht için yarışan dört rakip aile, Grace'i avlamak üzere harekete geçmiştir. Bu ölümcül mücadelenin kazananı, her şeye hükmedecektir.",
-        "genre_ids": [
-            27,
-            35
-        ],
-        "vote_average": 7.049,
-        "release_date": "2026-03-19"
-    },
-    {
         "id": 1234731,
         "title": "Anakonda",
         "overview": "Yıllardır en sevdikleri film olan Anakonda'yı yeniden çekmenin hayalini kuran iki arkadaş Doug ve Griff, orta yaş krizine girdikleri bir dönemde büyük hayallerini gerçekleştirmek için bir maceraya atılırlar.",
@@ -366,6 +355,17 @@
         ],
         "vote_average": 5.874,
         "release_date": "2025-12-24"
+    },
+    {
+        "id": 1266127,
+        "title": "Saklambaç 2",
+        "overview": "Le Domas ailesinin ölümcül saldırısından sağ kurtulan Grace, kabus dolu oyunun henüz bitmediğini fark eder. Artık çok daha büyük ve tehlikeli bir mücadelenin içindedir. Bu kez yanında yıllardır görüşmediği kız kardeşi Faith vardır. Grace'in amacı yalnızca hayatta kalmak değildir; kız kardeşini korumak ve dünyayı kontrol eden Konsey'in \"Yüksek Koltuğu\"nu ele geçirmek zorundadır. Ancak taht için yarışan dört rakip aile, Grace'i avlamak üzere harekete geçmiştir. Bu ölümcül mücadelenin kazananı, her şeye hükmedecektir.",
+        "genre_ids": [
+            27,
+            35
+        ],
+        "vote_average": 7.049,
+        "release_date": "2026-03-19"
     },
     {
         "id": 634649,
@@ -592,7 +592,7 @@
             35,
             16
         ],
-        "vote_average": 8.022,
+        "vote_average": 8.023,
         "release_date": "2025-06-20"
     },
     {
@@ -902,7 +902,7 @@
             28,
             35
         ],
-        "vote_average": 6.917,
+        "vote_average": 6.913,
         "release_date": "2026-02-13"
     },
     {
@@ -950,7 +950,7 @@
             80,
             35
         ],
-        "vote_average": 7.369,
+        "vote_average": 7.4,
         "release_date": "2025-09-23"
     },
     {
