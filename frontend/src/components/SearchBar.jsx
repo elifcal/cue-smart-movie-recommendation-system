@@ -1,27 +1,20 @@
 import { useState } from "react";
 
-const exampleQueries = [
-  "90'larda geçen korku filmi",
-  "psikolojik gerilim",
-  "twist sonlu film",
-];
-
 function SearchBar({ onSearch, loading }) {
   const [query, setQuery] = useState("");
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    onSearch(query);
-  };
 
-  const handleExampleClick = (example) => {
-    setQuery(example);
-    onSearch(example);
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery || loading) return;
+
+    onSearch(trimmedQuery);
   };
 
   return (
-    <div style={styles.wrapper}>
-      <form onSubmit={handleSubmit} style={styles.form}>
+    <form onSubmit={handleSubmit} style={styles.form}>
+      <div style={styles.inputRow}>
         <input
           type="text"
           placeholder="Örn: karanlık atmosferli gerilim filmi"
@@ -30,80 +23,58 @@ function SearchBar({ onSearch, loading }) {
           style={styles.input}
           disabled={loading}
         />
-        <button type="submit" style={styles.button} disabled={loading}>
+
+        <button
+          type="submit"
+          disabled={loading}
+          style={{
+            ...styles.button,
+            opacity: loading ? 0.8 : 1,
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
           {loading ? "Aranıyor..." : "Ara"}
         </button>
-      </form>
-
-      <div style={styles.examplesWrapper}>
-        <p style={styles.examplesLabel}>Örnek aramalar</p>
-        <div style={styles.examplesRow}>
-          {exampleQueries.map((example) => (
-            <button
-              key={example}
-              type="button"
-              style={styles.exampleButton}
-              onClick={() => handleExampleClick(example)}
-              disabled={loading}
-            >
-              {example}
-            </button>
-          ))}
-        </div>
       </div>
-    </div>
+    </form>
   );
 }
 
 const styles = {
-  wrapper: {
-    marginBottom: "24px",
-  },
   form: {
+    width: "100%",
+  },
+  inputRow: {
     display: "flex",
-    gap: "12px",
     justifyContent: "center",
+    alignItems: "center",
+    gap: "12px",
     flexWrap: "wrap",
   },
   input: {
-    width: "420px",
-    maxWidth: "100%",
-    padding: "12px",
-    borderRadius: "10px",
-    border: "1px solid #374151",
+    flex: "1 1 620px",
+    maxWidth: "620px",
+    minWidth: "260px",
+    padding: "15px 18px",
+    borderRadius: "16px",
+    border: "1px solid rgba(129, 140, 248, 0.22)",
+    background: "rgba(255,255,255,0.94)",
+    color: "#0f172a",
+    fontSize: "15px",
     outline: "none",
+    boxShadow:
+      "0 0 0 1px rgba(255,255,255,0.04), 0 10px 30px rgba(0,0,0,0.08)",
   },
   button: {
-    padding: "12px 20px",
-    borderRadius: "10px",
-    border: "none",
-    background: "#2563eb",
+    padding: "15px 22px",
+    borderRadius: "16px",
+    border: "1px solid rgba(99, 102, 241, 0.28)",
+    background: "linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)",
     color: "white",
-    cursor: "pointer",
-  },
-  examplesWrapper: {
-    marginTop: "16px",
-    textAlign: "center",
-  },
-  examplesLabel: {
-    color: "#d1d5db",
     fontSize: "14px",
-    marginBottom: "10px",
-  },
-  examplesRow: {
-    display: "flex",
-    justifyContent: "center",
-    gap: "10px",
-    flexWrap: "wrap",
-  },
-  exampleButton: {
-    padding: "8px 12px",
-    borderRadius: "999px",
-    border: "1px solid #374151",
-    background: "#1f2937",
-    color: "white",
-    cursor: "pointer",
-    fontSize: "13px",
+    fontWeight: "700",
+    minWidth: "96px",
+    boxShadow: "0 10px 24px rgba(59,130,246,0.22)",
   },
 };
 

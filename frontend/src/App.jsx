@@ -6,6 +6,12 @@ import MovieCard from "./components/MovieCard";
 const API_BASE_URL = import.meta.env.VITE_API_URL;
 const TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
 
+const EXAMPLE_QUERIES = [
+  "90'larda geçen karanlık bir gerilim filmi",
+  "Az şiddetli ama sürükleyici bir korku filmi",
+  "Twist sonlu bilim kurgu filmi",
+];
+
 function SkeletonCard() {
   return (
     <div style={styles.skeletonCard}>
@@ -28,14 +34,20 @@ function App() {
   const [movies, setMovies] = useState([]);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [noResults, setNoResults] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [showWarmupMessage, setShowWarmupMessage] = useState(false);
 
   useEffect(() => {
     const checkHealth = async () => {
+      if (!API_BASE_URL) {
+        setHealthStatus("API adresi eksik");
+        return;
+      }
+
       try {
         const response = await axios.get(`${API_BASE_URL}/health`);
-        setHealthStatus(response.data.status || "ok");
+        setHealthStatus(response?.data?.status || "ok");
       } catch {
         setHealthStatus("Backend'e bağlanılamadı");
       }
@@ -45,12 +57,24 @@ function App() {
   }, []);
 
   const handleSearch = async (query) => {
-    if (!query.trim()) return;
+    const trimmedQuery = query.trim();
+
+    if (!trimmedQuery) return;
+
+    if (!API_BASE_URL) {
+      setHasSearched(true);
+      setMovies([]);
+      setNoResults(false);
+      setErrorMessage("API adresi tanımlı değil. VITE_API_URL değerini kontrol et.");
+      return;
+    }
 
     setLoading(true);
     setErrorMessage("");
+    setNoResults(false);
     setHasSearched(true);
     setShowWarmupMessage(false);
+    setMovies([]);
 
     const warmupTimer = setTimeout(() => {
       setShowWarmupMessage(true);
@@ -58,36 +82,46 @@ function App() {
 
     try {
       const response = await axios.get(`${API_BASE_URL}/search`, {
-        params: { q: query },
+        params: { q: trimmedQuery },
       });
 
-      const results = Array.isArray(response.data.results)
+      const results = Array.isArray(response?.data?.results)
         ? response.data.results
         : [];
 
-      const formattedMovies = results.map((movie) => ({
+      const formattedMovies = results.map((movie, index) => ({
         ...movie,
-        tmdb_id: movie.id,
-        poster_url: movie.poster_path
-          ? `${TMDB_IMAGE_BASE_URL}${movie.poster_path}`
-          : "",
+        tmdb_id: movie.tmdb_id ?? movie.id ?? `movie-${index}`,
+        poster_url: movie.poster_url
+          ? movie.poster_url
+          : movie.poster_path
+            ? `${TMDB_IMAGE_BASE_URL}${movie.poster_path}`
+            : "",
+        year:
+          movie.year ??
+          (movie.release_date ? String(movie.release_date).slice(0, 4) : ""),
       }));
 
       setMovies(formattedMovies);
 
       if (formattedMovies.length === 0) {
-        setErrorMessage("Sonuç bulunamadı.");
+        setNoResults(true);
       }
     } catch (error) {
       console.error("Search error:", error);
       setMovies([]);
-      setErrorMessage("Arama sırasında bir hata oluştu.");
+      setNoResults(false);
+      setErrorMessage("Arama sırasında bir hata oluştu. Lütfen tekrar dene.");
     } finally {
       clearTimeout(warmupTimer);
       setLoading(false);
       setShowWarmupMessage(false);
     }
   };
+
+  const healthOk = ["ok", "healthy", "up"].includes(
+    String(healthStatus).toLowerCase()
+  );
 
   return (
     <div style={styles.page}>
@@ -98,36 +132,67 @@ function App() {
             <span
               style={{
                 ...styles.statusBadge,
-                backgroundColor:
-                  healthStatus === "ok"
-                    ? "rgba(22, 163, 74, 0.18)"
-                    : "rgba(220, 38, 38, 0.18)",
-                color: healthStatus === "ok" ? "#86efac" : "#fca5a5",
+                backgroundColor: healthOk
+                  ? "rgba(22, 163, 74, 0.18)"
+                  : "rgba(220, 38, 38, 0.18)",
+                color: healthOk ? "#86efac" : "#fca5a5",
               }}
             >
               API: {healthStatus}
             </span>
           </div>
 
-          <h1 style={styles.title}>Cue Smart Movie Recommendation</h1>
+          <img
+            src="/cue-hero.jpeg"
+            alt="Cue visual"
+            style={styles.heroBanner}
+          />
+
+          <h1 style={styles.title}>
+            <span style={styles.titleCue}>Cue</span>
+            <span style={styles.titleRest}>Smart Movie Recommendation</span>
+          </h1>
+
           <p style={styles.subtitle}>
-            Kullanıcının yazdığı isteğe göre film önerileri sunan, duygu eğrisi ve
-            görsel palet gibi zengin açıklamalar gösteren öneri arayüzü.
+            Doğal dilde yazdığın isteği anlayıp, duygu eğrisi ve görsel ipuçlarıyla
+            zenginleştirilmiş film önerileri sunan akıllı keşif arayüzü.
           </p>
+
+          <section style={styles.searchCard}>
+            <SearchBar onSearch={handleSearch} loading={loading} />
+
+            {!hasSearched && !loading && (
+              <>
+                <p style={styles.searchHint}>
+                  Örnek bir istek yaz veya aşağıdaki aramalardan birini dene.
+                </p>
+
+                <div style={styles.exampleList}>
+                  {EXAMPLE_QUERIES.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      style={styles.exampleChip}
+                      onClick={() => handleSearch(item)}
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
         </header>
-
-        <section style={styles.searchSection}>
-          <SearchBar onSearch={handleSearch} loading={loading} />
-        </section>
-
-        {!hasSearched && !loading && !errorMessage && (
-          <div style={styles.infoBox}>
-            Arama yaparak backend’den gerçek sonuçları getir.
-          </div>
-        )}
 
         {!loading && errorMessage && (
           <div style={styles.errorBox}>{errorMessage}</div>
+        )}
+
+        {!loading && noResults && !errorMessage && (
+          <div style={styles.infoBox}>
+            Aramana uygun sonuç bulunamadı. Daha farklı bir ifade veya daha genel
+            bir açıklama deneyebilirsin.
+          </div>
         )}
 
         {loading && showWarmupMessage && (
@@ -136,15 +201,25 @@ function App() {
           </div>
         )}
 
-        <section style={styles.grid}>
-          {loading
-            ? Array.from({ length: 3 }).map((_, index) => (
-                <SkeletonCard key={index} />
-              ))
-            : movies.map((movie) => (
-                <MovieCard key={movie.tmdb_id} movie={movie} />
-              ))}
-        </section>
+        {(loading || movies.length > 0) && (
+          <section style={styles.resultsSection}>
+            <div style={styles.resultsHeader}>
+              <h2 style={styles.resultsTitle}>
+                {loading ? "Öneriler hazırlanıyor..." : "Önerilen Filmler"}
+              </h2>
+            </div>
+
+            <div style={styles.grid}>
+              {loading
+                ? Array.from({ length: 3 }).map((_, index) => (
+                    <SkeletonCard key={index} />
+                  ))
+                : movies.map((movie) => (
+                    <MovieCard key={movie.tmdb_id} movie={movie} />
+                  ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -160,17 +235,22 @@ const shimmer = {
 const styles = {
   page: {
     minHeight: "100vh",
-    background:
-      "radial-gradient(circle at top, rgba(37,99,235,0.14), transparent 30%), #0f172a",
+    background: `
+      radial-gradient(circle at 18% 20%, rgba(139, 92, 246, 0.28), transparent 26%),
+      radial-gradient(circle at 82% 10%, rgba(59, 130, 246, 0.12), transparent 22%),
+      radial-gradient(circle at 50% 100%, rgba(168, 85, 247, 0.10), transparent 28%),
+      linear-gradient(180deg, #080d1d 0%, #0a1023 48%, #090f20 100%)
+    `,
     color: "white",
-    padding: "32px 20px",
+    padding: "28px 20px 56px",
   },
   container: {
-    maxWidth: "1180px",
+    maxWidth: "1200px",
     margin: "0 auto",
   },
   hero: {
     textAlign: "center",
+    paddingTop: "4px",
     marginBottom: "28px",
   },
   badgeRow: {
@@ -183,11 +263,12 @@ const styles = {
   badge: {
     padding: "8px 14px",
     borderRadius: "999px",
-    background: "rgba(59, 130, 246, 0.18)",
-    color: "#bfdbfe",
+    background: "rgba(99, 102, 241, 0.16)",
+    color: "#c7d2fe",
     fontSize: "13px",
     fontWeight: "600",
-    border: "1px solid rgba(96, 165, 250, 0.25)",
+    border: "1px solid rgba(129, 140, 248, 0.22)",
+    boxShadow: "0 0 24px rgba(99, 102, 241, 0.08)",
   },
   statusBadge: {
     padding: "8px 14px",
@@ -196,32 +277,91 @@ const styles = {
     fontWeight: "600",
     border: "1px solid rgba(255,255,255,0.08)",
   },
+  heroBanner: {
+    width: "100%",
+    maxWidth: "760px",
+    height: "auto",
+    display: "block",
+    margin: "8px auto 26px auto",
+    borderRadius: "28px",
+    objectFit: "contain",
+    boxShadow:
+      "0 0 38px rgba(168, 85, 247, 0.20), 0 0 72px rgba(59, 130, 246, 0.10)",
+  },
   title: {
-    fontSize: "clamp(28px, 5vw, 44px)",
-    lineHeight: "1.1",
-    marginBottom: "12px",
+    margin: "0 0 14px 0",
+  },
+  titleCue: {
+    display: "block",
+    fontSize: "clamp(68px, 11vw, 126px)",
+    lineHeight: "0.9",
+    fontWeight: "800",
+    letterSpacing: "-0.08em",
+    background: "linear-gradient(90deg, #ffffff 0%, #eadcff 42%, #b5c8ff 100%)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    textShadow: "0 0 36px rgba(168, 85, 247, 0.20)",
+  },
+  titleRest: {
+    display: "block",
+    marginTop: "6px",
+    fontSize: "clamp(22px, 3.2vw, 44px)",
+    lineHeight: "1.08",
+    fontWeight: "700",
+    color: "#f1f5f9",
+    letterSpacing: "-0.03em",
   },
   subtitle: {
     maxWidth: "760px",
-    margin: "0 auto",
+    margin: "0 auto 28px auto",
     color: "#cbd5e1",
     fontSize: "15px",
+    lineHeight: "1.8",
+  },
+  searchCard: {
+    maxWidth: "920px",
+    margin: "0 auto",
+    padding: "28px 26px",
+    borderRadius: "28px",
+    background:
+      "linear-gradient(180deg, rgba(12,18,40,0.82) 0%, rgba(10,15,35,0.76) 100%)",
+    border: "1px solid rgba(168, 85, 247, 0.14)",
+    backdropFilter: "blur(12px)",
+    boxShadow:
+      "0 24px 70px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.03)",
+  },
+  searchHint: {
+    margin: "18px 0 0 0",
+    color: "#cbd5e1",
+    fontSize: "14px",
     lineHeight: "1.7",
   },
-  searchSection: {
-    background: "rgba(15, 23, 42, 0.7)",
-    border: "1px solid rgba(148, 163, 184, 0.14)",
-    borderRadius: "20px",
-    padding: "20px",
-    backdropFilter: "blur(10px)",
-    marginBottom: "24px",
+  exampleList: {
+    marginTop: "18px",
+    display: "flex",
+    justifyContent: "center",
+    flexWrap: "wrap",
+    gap: "12px",
+  },
+  exampleChip: {
+    padding: "12px 18px",
+    borderRadius: "999px",
+    border: "1px solid rgba(129, 140, 248, 0.24)",
+    background:
+      "linear-gradient(180deg, rgba(30,41,59,0.95) 0%, rgba(17,24,39,0.95) 100%)",
+    color: "#e0e7ff",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: "600",
+    boxShadow: "0 0 20px rgba(99, 102, 241, 0.06)",
   },
   infoBox: {
     textAlign: "center",
     color: "#d1d5db",
-    marginBottom: "20px",
+    margin: "0 auto 20px auto",
+    maxWidth: "920px",
     padding: "14px 16px",
-    borderRadius: "14px",
+    borderRadius: "16px",
     background: "rgba(31, 41, 55, 0.9)",
     border: "1px solid rgba(255,255,255,0.06)",
   },
@@ -229,9 +369,10 @@ const styles = {
     textAlign: "center",
     color: "#fecaca",
     fontWeight: "600",
-    marginBottom: "20px",
+    margin: "0 auto 20px auto",
+    maxWidth: "920px",
     padding: "14px 16px",
-    borderRadius: "14px",
+    borderRadius: "16px",
     background: "rgba(127, 29, 29, 0.35)",
     border: "1px solid rgba(248, 113, 113, 0.25)",
   },
@@ -239,11 +380,24 @@ const styles = {
     textAlign: "center",
     color: "#fde68a",
     fontWeight: "600",
-    marginBottom: "20px",
+    margin: "0 auto 20px auto",
+    maxWidth: "920px",
     padding: "14px 16px",
-    borderRadius: "14px",
+    borderRadius: "16px",
     background: "rgba(120, 53, 15, 0.35)",
     border: "1px solid rgba(251, 191, 36, 0.25)",
+  },
+  resultsSection: {
+    marginTop: "26px",
+  },
+  resultsHeader: {
+    marginBottom: "16px",
+  },
+  resultsTitle: {
+    margin: 0,
+    fontSize: "28px",
+    color: "#f8fafc",
+    textAlign: "center",
   },
   grid: {
     display: "grid",
