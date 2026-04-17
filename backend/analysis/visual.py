@@ -35,13 +35,18 @@ def sicaklik_hesapla(palette):
     return round(sum(sicakliklar) / len(sicakliklar), 3)
 
 # Tüm görsel analizi tek fonksiyonda çalıştır
-def gorsel_analiz(poster_url):
+def analyze_visual(tmdb_id, poster_url):
+    # tmdb_id parametresi bu aşamada doğrudan görsel analizde kullanılmasa da, 
+    # ana boru hattının gönderdiği parametre imzasını (signature) karşılamak zorundadır.
+    
     renkler = renk_paleti_cikar(poster_url)
     palette = renkler["palette"]
+    
+    # Anahtar isimleri test_pipeline.py'nin beklediği formata (İngilizce) çevrildi
     return {
-        "dominant_renk": renkler["dominant"],
-        "renk_paleti": palette,
-        "parlaklik": parlaklik_hesapla(palette),
-        "doygunluk": doygunluk_hesapla(palette),
-        "sicaklik": sicaklik_hesapla(palette),
+        "dominant_color": renkler["dominant"],
+        "color_palette": palette,
+        "brightness": parlaklik_hesapla(palette),
+        "saturation": doygunluk_hesapla(palette),
+        "warmth": sicaklik_hesapla(palette),
     }
