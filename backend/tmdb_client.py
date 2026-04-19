@@ -100,3 +100,4 @@ def prepare_person_b_json(limit=100):
 if __name__ == "__main__":
 #  JSON'u hazırla
 #prepare_person_b_json(limit=100)
+    pass

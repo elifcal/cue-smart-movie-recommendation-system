@@ -1,7 +1,9 @@
 """
-Film öneri motoru — Parser ile tam uyumlu final versiyon.
+content_filter.py
+-----------------
+Film öneri motoru — TF-IDF tabanlı content filtering.
 
-Parser çıktısı yapısı:
+Parser çıktısı yapısı (ai_parser.py şeması ile tam uyumlu):
 {
     "genre_ids": [int],
     "exclude_genre_ids": [int],
@@ -13,10 +15,17 @@ Parser çıktısı yapısı:
     "low_violence": bool,
     "high_violence": bool,
     "runtime_pref": "short" | "long" | None,
+    "rating_pref": "high" | "popular" | None,
     "original_language": str | None,
     "country": str | None,
-    "rating_pref": "high" | "popular" | None,
 }
+
+Düzeltmeler:
+- english_title combined metne dahil edildi (TF-IDF eşleşmesi için)
+- tagline combined metne dahil edildi
+- rank_movies çıktısı: videos, english_title, tagline alanları eklendi
+  (main.py enrich_for_display bu alanları kullanıyor)
+- tmdb_score alanı vote_average'den üretiliyor (ranker bunu bekliyor)
 """
 
 from __future__ import annotations
@@ -42,47 +51,19 @@ TURKISH_STOPWORDS = [
 ]
 
 GENRE_ID_TO_TR: Dict[int, str] = {
-    28: "aksiyon",
-    12: "macera",
-    16: "animasyon",
-    35: "komedi",
-    80: "suç",
-    99: "belgesel",
-    18: "dram",
-    10751: "aile",
-    14: "fantastik",
-    36: "tarih",
-    27: "korku",
-    10402: "müzik",
-    9648: "gizem",
-    10749: "romantik",
-    878: "bilim kurgu",
-    10770: "tv filmi",
-    53: "gerilim",
-    10752: "savaş",
-    37: "western",
+    28: "aksiyon", 12: "macera", 16: "animasyon", 35: "komedi",
+    80: "suç", 99: "belgesel", 18: "dram", 10751: "aile",
+    14: "fantastik", 36: "tarih", 27: "korku", 10402: "müzik",
+    9648: "gizem", 10749: "romantik", 878: "bilim kurgu",
+    10770: "tv filmi", 53: "gerilim", 10752: "savaş", 37: "western",
 }
 
 GENRE_ID_TO_EN: Dict[int, str] = {
-    28: "action",
-    12: "adventure",
-    16: "animation",
-    35: "comedy",
-    80: "crime",
-    99: "documentary",
-    18: "drama",
-    10751: "family",
-    14: "fantasy",
-    36: "history",
-    27: "horror",
-    10402: "music",
-    9648: "mystery",
-    10749: "romance",
-    878: "science fiction",
-    10770: "tv movie",
-    53: "thriller",
-    10752: "war",
-    37: "western",
+    28: "action", 12: "adventure", 16: "animation", 35: "comedy",
+    80: "crime", 99: "documentary", 18: "drama", 10751: "family",
+    14: "fantasy", 36: "history", 27: "horror", 10402: "music",
+    9648: "mystery", 10749: "romance", 878: "science fiction",
+    10770: "tv movie", 53: "thriller", 10752: "war", 37: "western",
 }
 
 MOOD_MAP_TR: Dict[str, str] = {
@@ -177,6 +158,7 @@ RUNTIME_PREF_TO_MINUTES: Dict[str, Dict[str, Optional[int]]] = {
 COUNTRY_ISO_TO_LANG: Dict[str, str] = {
     "TR": "tr", "KR": "ko", "JP": "ja", "FR": "fr",
     "US": "en", "GB": "en", "CN": "zh", "IN": "hi",
+    "DE": "de", "IT": "it", "ES": "es", "RU": "ru",
 }
 
 AUTO_TRANSLATE_LANGS = {"en", "tr"}
@@ -196,13 +178,11 @@ def _dynamic_min_vote_count(pool_size: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Parser uyumluluk adaptörü
+# Parser → content_filter adaptörü
 # ---------------------------------------------------------------------------
 
 def normalize_filters(raw_filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Parser çıktısını recommender'ın iç sözleşmesine dönüştürür.
-    """
+    """ai_parser çıktısını content_filter iç sözleşmesine dönüştürür."""
     if not raw_filters:
         return raw_filters
 
@@ -223,13 +203,12 @@ def normalize_filters(raw_filters: Optional[Dict[str, Any]]) -> Optional[Dict[st
 
     country = f.get("country")
     if country:
-        f.setdefault("production_country", country)
-
-    # country verildiyse ve original_language boşsa yardımcı fallback
-    if country and not f.get("original_language"):
-        inferred_lang = COUNTRY_ISO_TO_LANG.get(str(country).upper())
-        if inferred_lang:
-            f["original_language"] = inferred_lang
+        country_upper = str(country).upper()
+        f.setdefault("production_country", country_upper)
+        if not f.get("original_language"):
+            inferred_lang = COUNTRY_ISO_TO_LANG.get(country_upper)
+            if inferred_lang:
+                f["original_language"] = inferred_lang
 
     return f
 
@@ -379,7 +358,9 @@ def prepare_df(
         ])
 
     defaults: Dict[str, Any] = {
-        "id": None, "title": "", "original_title": "", "overview": "",
+        "id": None,
+        "title": "", "english_title": "", "original_title": "",
+        "overview": "", "tagline": "",
         "genres": None, "genre_ids": None, "keywords": None,
         "production_countries": None, "spoken_languages": None, "credits": None,
         "vote_average": 0.0, "vote_count": 0, "popularity": 0.0,
@@ -391,46 +372,48 @@ def prepare_df(
         if col not in df.columns:
             df[col] = default
 
-    for col in ("title", "original_title", "overview"):
+    for col in ("title", "english_title", "original_title", "overview", "tagline"):
         df[col] = df[col].apply(clean_text)
 
-    df["title_clean"] = df["title"].apply(clean_text_lower)
-    df["original_title_clean"] = df["original_title"].apply(clean_text_lower)
-    df["overview_clean"] = df["overview"].apply(clean_text_lower)
+    df["title_clean"]         = df["title"].apply(clean_text_lower)
+    df["english_title_clean"] = df["english_title"].apply(clean_text_lower)
+    df["original_title_clean"]= df["original_title"].apply(clean_text_lower)
+    df["overview_clean"]      = df["overview"].apply(clean_text_lower)
+    df["tagline_clean"]       = df["tagline"].apply(clean_text_lower)
 
     df["genres_from_objects"] = df["genres"].apply(parse_genres_from_objects)
-    df["genres_from_ids"] = df["genre_ids"].apply(
+    df["genres_from_ids"]     = df["genre_ids"].apply(
         lambda x: parse_genres_from_ids(x, content_language)
     )
     df["genres_str"] = df.apply(
         lambda row: row["genres_from_objects"] or row["genres_from_ids"], axis=1
     )
 
-    df["keywords_str"] = df["keywords"].apply(parse_keywords)
-    df["countries_str"] = df["production_countries"].apply(parse_production_countries)
-    df["spoken_languages_str"] = df["spoken_languages"].apply(parse_spoken_languages)
-    df["credits_str"] = df["credits"].apply(
+    df["keywords_str"]        = df["keywords"].apply(parse_keywords)
+    df["countries_str"]       = df["production_countries"].apply(parse_production_countries)
+    df["spoken_languages_str"]= df["spoken_languages"].apply(parse_spoken_languages)
+    df["credits_str"]         = df["credits"].apply(
         lambda c: parse_credits(c, include_credits=include_credits)
     )
+    df["country_codes"]       = df["production_countries"].apply(_extract_country_codes)
 
-    df["country_codes"] = df["production_countries"].apply(_extract_country_codes)
-
-    # Weighted combined text
     df["combined"] = (
-        (df["title_clean"] + " ") * 2 +
+        (df["title_clean"]          + " ") * 2 +
+        (df["english_title_clean"]  + " ") * 2 +   # ← eklendi
         (df["original_title_clean"] + " ") * 1 +
-        (df["genres_str"] + " ") * 3 +
-        (df["keywords_str"] + " ") * 3 +
-        (df["overview_clean"] + " ") * 1 +
-        (df["countries_str"] + " ") * 1 +
+        (df["genres_str"]           + " ") * 3 +
+        (df["keywords_str"]         + " ") * 3 +
+        (df["overview_clean"]       + " ") * 1 +
+        (df["tagline_clean"]        + " ") * 1 +   # ← eklendi
+        (df["countries_str"]        + " ") * 1 +
         (df["spoken_languages_str"] + " ") * 1 +
-        (df["credits_str"] + " ") * 1
+        (df["credits_str"]          + " ") * 1
     ).str.strip()
 
-    df["vote_count"] = pd.to_numeric(df["vote_count"], errors="coerce").fillna(0).astype(int)
+    df["vote_count"]   = pd.to_numeric(df["vote_count"],   errors="coerce").fillna(0).astype(int)
     df["vote_average"] = pd.to_numeric(df["vote_average"], errors="coerce").fillna(0.0)
-    df["popularity"] = pd.to_numeric(df["popularity"], errors="coerce").fillna(0.0)
-    df["runtime"] = pd.to_numeric(df["runtime"], errors="coerce")
+    df["popularity"]   = pd.to_numeric(df["popularity"],   errors="coerce").fillna(0.0)
+    df["runtime"]      = pd.to_numeric(df["runtime"],      errors="coerce")
 
     return df
 
@@ -443,7 +426,6 @@ def detect_query_language(raw_query: str) -> str:
     query = clean_text(raw_query).lower()
     if any(ch in query for ch in "çğıöşü"):
         return "tr"
-
     turkish_hints = {
         "film", "filmi", "dizi", "korku", "aksiyon", "dram", "komedi",
         "gerilim", "romantik", "macera", "gizem", "suç", "aile",
@@ -492,39 +474,28 @@ def build_enriched_query(
     filters: Optional[Dict[str, Any]],
     content_language: str,
 ) -> str:
-    """
-    Soft sinyaller:
-    - mood
-    - theme
-    - rating_pref
-    - violence
-    """
     if not filters:
         return processed_query.strip()
 
     extra: List[str] = []
-    mood = filters.get("mood")
-    excluded_moods: List[str] = filters.get("excluded_moods") or []
-    themes: List[str] = filters.get("theme") or []
-    rating_pref = filters.get("rating_pref")
-    low_violence = bool(filters.get("low_violence"))
-    high_violence = bool(filters.get("high_violence"))
+    mood: Optional[str]      = filters.get("mood")
+    excluded_moods: List[str]= filters.get("excluded_moods") or []
+    themes: List[str]        = filters.get("theme") or []
+    rating_pref: Optional[str]= filters.get("rating_pref")
+    low_violence: bool       = bool(filters.get("low_violence"))
+    high_violence: bool      = bool(filters.get("high_violence"))
 
-    mood_map = MOOD_MAP_TR if content_language == "tr" else MOOD_MAP_EN
-    theme_map = THEME_MAP_TR if content_language == "tr" else THEME_MAP_EN
-    rating_map = RATING_PREF_MAP_TR if content_language == "tr" else RATING_PREF_MAP_EN
+    mood_map     = MOOD_MAP_TR     if content_language == "tr" else MOOD_MAP_EN
+    theme_map    = THEME_MAP_TR    if content_language == "tr" else THEME_MAP_EN
+    rating_map   = RATING_PREF_MAP_TR if content_language == "tr" else RATING_PREF_MAP_EN
     violence_map = VIOLENCE_MAP_TR if content_language == "tr" else VIOLENCE_MAP_EN
 
     if mood and mood not in excluded_moods:
         extra.append(mood_map.get(mood, mood))
-
     for theme in themes:
         extra.append(theme_map.get(theme, theme))
-
     if rating_pref:
         extra.append(rating_map.get(rating_pref, rating_pref))
-
-    # violence soft signal
     if low_violence and not high_violence:
         extra.append(violence_map["low"])
     elif high_violence and not low_violence:
@@ -545,23 +516,26 @@ def apply_hard_filters(
     if df.empty:
         return df
 
+    df = df.copy()
+
     if not include_adult and "adult" in df.columns:
         df = df[~df["adult"].astype(bool)]
 
-    min_votes = _dynamic_min_vote_count(len(df))
-    df = df[df["vote_count"] >= min_votes]
+    if "vote_count" in df.columns:
+        min_votes = _dynamic_min_vote_count(len(df))
+        df = df[df["vote_count"] >= min_votes]
 
     if not filters:
         return df.reset_index(drop=True)
 
     genre_ids: Optional[List[int]] = filters.get("genre_ids")
-    if genre_ids:
+    if genre_ids and "genre_ids" in df.columns:
         df = df[df["genre_ids"].apply(
             lambda cell: isinstance(cell, list) and any(g in cell for g in genre_ids)
         )]
 
     exclude_genre_ids: Optional[List[int]] = filters.get("exclude_genre_ids")
-    if exclude_genre_ids:
+    if exclude_genre_ids and "genre_ids" in df.columns:
         df = df[df["genre_ids"].apply(
             lambda cell: not (isinstance(cell, list) and any(g in cell for g in exclude_genre_ids))
         )]
@@ -572,21 +546,31 @@ def apply_hard_filters(
 
     min_year: Optional[int] = filters.get("min_year")
     max_year: Optional[int] = filters.get("max_year")
-    if min_year is not None:
-        df = df[df["release_date"].apply(_year).apply(lambda y: y is not None and y >= min_year)]
-    if max_year is not None:
-        df = df[df["release_date"].apply(_year).apply(lambda y: y is not None and y <= max_year)]
+
+    if min_year is not None or max_year is not None:
+        if "release_date" not in df.columns:
+            logger.warning("release_date kolonu bulunamadı, yıl filtreleri atlandı.")
+        else:
+            years = df["release_date"].apply(_year)
+            if min_year is not None:
+                df = df[years.apply(lambda y: y is not None and y >= min_year)]
+                years = df["release_date"].apply(_year)
+            if max_year is not None:
+                df = df[years.apply(lambda y: y is not None and y <= max_year)]
 
     min_runtime: Optional[int] = filters.get("min_runtime")
     max_runtime: Optional[int] = filters.get("max_runtime")
-    if min_runtime is not None:
+    if min_runtime is not None and "runtime" in df.columns:
         df = df[df["runtime"].fillna(0) >= min_runtime]
-    if max_runtime is not None:
+    if max_runtime is not None and "runtime" in df.columns:
         df = df[df["runtime"].fillna(9999) <= max_runtime]
 
     original_language: Optional[str] = filters.get("original_language")
-    if original_language:
-        df = df[df["original_language"].str.lower() == original_language.lower()]
+    if original_language and "original_language" in df.columns:
+        df = df[
+            df["original_language"].fillna("").astype(str).str.lower()
+            == original_language.lower()
+        ]
 
     production_country: Optional[str] = filters.get("production_country")
     if production_country and "country_codes" in df.columns:
@@ -625,7 +609,7 @@ def rank_movies(
         return []
 
     query_vec = vectorizer.transform([enriched_query])
-    scores = cosine_similarity(query_vec, matrix).flatten()
+    scores    = cosine_similarity(query_vec, matrix).flatten()
     sorted_indices = scores.argsort()[::-1]
 
     results: List[Dict[str, Any]] = []
@@ -635,28 +619,30 @@ def rank_movies(
             break
         row = df.iloc[idx]
         results.append({
-            "id": row.get("id"),
-            "title": row.get("title", ""),
-            "original_title": row.get("original_title", ""),
-            "overview": row.get("overview", ""),
-            "genres": row.get("genres_str", ""),
-            "content_score": round(score, 4),
-            "vote_average": float(row.get("vote_average") or 0.0),
-            "vote_count": int(row.get("vote_count") or 0),
-            "popularity": float(row.get("popularity") or 0.0),
-            "release_date": row.get("release_date", ""),
-            "runtime": row.get("runtime"),
-            "original_language": row.get("original_language", ""),
-            "adult": bool(row.get("adult", False)),
-            "poster_path": row.get("poster_path"),
-            "videos": row.get("videos"),
-            "imdb_id": row.get("imdb_id"),
-            "genre_ids": row.get("genre_ids"),
-            "keywords": row.get("keywords"),
+            "id":                   row.get("id"),
+            "title":                row.get("title", ""),
+            "english_title":        row.get("english_title", ""),   # ← eklendi
+            "original_title":       row.get("original_title", ""),
+            "overview":             row.get("overview", ""),
+            "tagline":              row.get("tagline", ""),         # ← eklendi
+            "genres":               row.get("genres_str", ""),
+            "content_score":        round(score, 4),
+            "tmdb_score":           float(row.get("vote_average") or 0.0),  # ranker için
+            "vote_count":           int(row.get("vote_count") or 0),
+            "popularity":           float(row.get("popularity") or 0.0),
+            "release_date":         row.get("release_date", ""),
+            "runtime":              row.get("runtime"),
+            "original_language":    row.get("original_language", ""),
+            "adult":                bool(row.get("adult", False)),
+            "poster_path":          row.get("poster_path"),
+            "videos":               row.get("videos"),              # ← eklendi (YouTube için)
+            "imdb_id":              row.get("imdb_id"),
+            "genre_ids":            row.get("genre_ids"),
+            "keywords":             row.get("keywords"),
             "production_countries": row.get("production_countries"),
-            "spoken_languages": row.get("spoken_languages"),
-            "credits": row.get("credits"),
-            "release_dates": row.get("release_dates"),
+            "spoken_languages":     row.get("spoken_languages"),
+            "credits":              row.get("credits"),
+            "release_dates":        row.get("release_dates"),
         })
         if len(results) == top_n:
             break
@@ -679,12 +665,6 @@ def get_recommendations_from_list(
 ) -> Tuple[str, List[Dict[str, Any]]]:
     filters = normalize_filters(parsed_filters)
 
-    # language fallback
-    if filters and not filters.get("original_language") and filters.get("production_country"):
-        inferred = COUNTRY_ISO_TO_LANG.get(str(filters["production_country"]).upper())
-        if inferred:
-            filters["original_language"] = inferred
-
     df = prepare_df(movies_list, content_language, include_credits=include_credits)
     if df.empty:
         return "", []
@@ -694,10 +674,7 @@ def get_recommendations_from_list(
         content_language=content_language,
     )
     if content_language == "en" and detected_lang == "tr":
-        logger.warning(
-            "Sorgu Türkçe algılandı ama content_language='en'. "
-            "Çeviri başarısız olmuş olabilir."
-        )
+        logger.info("Sorgu Türkçe ama content_language='en' — sorgu İngilizceye çevrildi.")
 
     enriched_query = build_enriched_query(
         processed_query=processed_query,
@@ -705,11 +682,7 @@ def get_recommendations_from_list(
         content_language=content_language,
     )
 
-    df_filtered = apply_hard_filters(
-        df=df,
-        filters=filters,
-        include_adult=include_adult,
-    )
+    df_filtered = apply_hard_filters(df=df, filters=filters, include_adult=include_adult)
     if df_filtered.empty:
         logger.warning("Hard filtreler sonrası hiçbir film kalmadı. Filtreler: %s", filters)
         return enriched_query, []
@@ -724,28 +697,3 @@ def get_recommendations_from_list(
     )
 
     return enriched_query, results
-
-
-# ---------------------------------------------------------------------------
-# Debug çıktısı
-# ---------------------------------------------------------------------------
-
-def print_results(
-    raw_query: str,
-    enriched_query: str,
-    results: List[Dict[str, Any]],
-) -> None:
-    print(f"\nKullanıcı sorgusu  : {raw_query}")
-    print(f"TF-IDF final sorgu : {enriched_query}")
-    if not results:
-        print("\nAnlamlı sonuç bulunamadı.")
-        return
-    print(f"\nİlk {len(results)} sonuç:\n")
-    for i, item in enumerate(results, start=1):
-        print(
-            f"{i}. {item['title']} | score: {item['content_score']} "
-            f"| oy: {item['vote_average']} ({item['vote_count']})"
-        )
-        print(f"   ID     : {item['id']}")
-        print(f"   Türler : {item['genres']}")
-        print(f"   Özet   : {item['overview'][:120]}...\n")
