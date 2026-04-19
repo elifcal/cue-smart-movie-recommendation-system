@@ -11,3 +11,7 @@ tmp/
 frontend/node_modules/
 frontend/.env
 *.webm
+
+.env
+frontend/.env
+backend/.env
