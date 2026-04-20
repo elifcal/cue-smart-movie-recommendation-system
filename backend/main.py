@@ -1,5 +1,17 @@
 """
-main.py — CUE FastAPI v0.5.0
+main.py — CUE FastAPI v0.6.0
+
+v0.6.0 değişiklikleri:
+- Çeviri sistemi kaldırıldı (GoogleTranslator → yok).
+  * Türk filmler: TR overview kullanılır, çeviri yapılmaz.
+  * Yabancı filmler: overview_tr / tagline_tr DB'den çekilir.
+    overview_tr boşsa overview (EN) fallback olarak kullanılır.
+- DB'den film çekerken akıllı genre/dil eşleştirme yapılır (random değil).
+- dna_vector Supabase'den çekilerek ranker'a iletilir.
+- ai_parser'ın dna_query_vector'ü ranker'a doğrudan geçer.
+- content_filter.py artık translate_fn parametresi alır.
+- CORS: render/vercel uyumlu.
+- make_json_safe güçlendirildi.
 """
 
 import json
@@ -8,6 +20,7 @@ import math
 import os
 import time
 from typing import Any, Dict, List, Optional, Set
+from deep_translator import GoogleTranslator
 
 import numpy as np
 import pandas as pd
@@ -15,16 +28,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
-from deep_translator import GoogleTranslator
 
 from nlp.ai_parser import parse_query_with_ai
 from ml.content_filter import (
     get_recommendations_from_list,
     normalize_filters,
-    set_translator as _cf_set_translator,
 )
 from ml.collaborative_lite import collab_score_by_tmdb_ids, load_lite_model
-from ml.ranker import HybridRanker
+from ml.ranker import HybridRanker, normalize_collab_score
 from ml.explainer import generate_batch_why_texts
 
 load_dotenv()
@@ -32,49 +43,29 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Tür ID → Türkçe
+# Tür ID → Türkçe (görüntüleme için)
 # ---------------------------------------------------------------------------
 
 GENRE_ID_TO_TR: Dict[int, str] = {
-    28: "Aksiyon",
-    12: "Macera",
-    16: "Animasyon",
-    35: "Komedi",
-    80: "Suç",
-    99: "Belgesel",
-    18: "Dram",
-    10751: "Aile",
-    14: "Fantastik",
-    36: "Tarih",
-    27: "Korku",
-    10402: "Müzik",
-    9648: "Gizem",
-    10749: "Romantik",
-    878: "Bilim Kurgu",
-    10770: "TV Filmi",
-    53: "Gerilim",
-    10752: "Savaş",
-    37: "Western",
+    28: "Aksiyon", 12: "Macera", 16: "Animasyon", 35: "Komedi",
+    80: "Suç", 99: "Belgesel", 18: "Dram", 10751: "Aile",
+    14: "Fantastik", 36: "Tarih", 27: "Korku", 10402: "Müzik",
+    9648: "Gizem", 10749: "Romantik", 878: "Bilim Kurgu",
+    10770: "TV Filmi", 53: "Gerilim", 10752: "Savaş", 37: "Western",
 }
 
 TR_LANGUAGE_HINTS = {
-    "turk",
-    "turkish",
-    "türk",
-    "turkce",
-    "türkçe",
-    "yerli",
-    "anadolu",
+    "turk", "turkish", "türk", "turkce", "türkçe", "yerli", "anadolu",
 }
 
 FOREIGN_LANGUAGE_HINTS = {
     "korean", "kore", "japanese", "japon", "french", "fransiz", "fransız",
     "german", "alman", "italian", "italyan", "spanish", "ispanyol",
-    "english", "ingilizce", "ingiliz", "american", "amerika",
+    "english", "ingilizce", "ingiliz", "american", "amerikan",
 }
 
 # ---------------------------------------------------------------------------
-# SVD lite model — startup'ta bir kez yükle
+# SVD lite model
 # ---------------------------------------------------------------------------
 
 _lite_model: Optional[Dict[str, Any]] = None
@@ -91,53 +82,38 @@ except Exception as exc:
 # FastAPI
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Cue API", version="0.5.0")
-
-
-@app.on_event("startup")
-async def _inject_translator() -> None:
-    _cf_set_translator(translate_to_english)
-    logger.info("content_filter translator enjeksiyonu tamamlandı.")
-
+app = FastAPI(title="Cue API", version="0.6.0")
 
 origins = [
     "https://cue-smart-movie-recommendation-syst-orpin.vercel.app",
     "http://localhost:3000",
+    "http://localhost:5173",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 # ---------------------------------------------------------------------------
-# SVD normalize
+# Sabitler
 # ---------------------------------------------------------------------------
 
 _SVD_MIN = 0.5
 _SVD_MAX = 5.0
-
-# ---------------------------------------------------------------------------
-# Çeviri — cache + rate-limit koruması
-# ---------------------------------------------------------------------------
-
-_translation_cache: Dict[tuple, str] = {}
-_CACHE_MAX = 2048
-_TRANSLATE_DELAY = 0.25
-_last_translate_time = 0.0
-
-# ---------------------------------------------------------------------------
-# Sonuç limitleri
-# ---------------------------------------------------------------------------
-
 CONTENT_TOP_N = 30
 FINAL_TOP_N = 15
 
+# DB'den kaç film çekileceği (tür/dil filtreli)
+_DB_LIMIT_DEFAULT = 300
+_DB_LIMIT_SPECIFIC = 500
+_DB_LIMIT_VERY_SPECIFIC = 700
+
 # ---------------------------------------------------------------------------
-# JSON temizleme
+# JSON güvenliği
 # ---------------------------------------------------------------------------
 
 def make_json_safe(obj: Any) -> Any:
@@ -151,6 +127,8 @@ def make_json_safe(obj: Any) -> Any:
         return None if (np.isnan(obj) or np.isinf(obj)) else float(obj)
     if isinstance(obj, np.bool_):
         return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return make_json_safe(obj.tolist())
     if isinstance(obj, float):
         return None if (math.isnan(obj) or math.isinf(obj)) else obj
     if obj is pd.NA:
@@ -165,17 +143,13 @@ def make_json_safe(obj: Any) -> Any:
 def decide_content_language(parsed_filters: Dict[str, Any], raw_query: str) -> str:
     """
     İçerik havuzunun hangi dilde işleneceğine karar verir.
-
-    Öncelik sırası:
-    1. original_language
-    2. country
-    3. query içindeki TR / yabancı dil ipuçları
-    4. fallback = en
+    TR → Türk film havuzu (TR TF-IDF)
+    EN → Yabancı film havuzu (EN TF-IDF)
     """
     original_language = str(parsed_filters.get("original_language") or "").strip().lower()
-    if original_language:
-        if original_language == "tr":
-            return "tr"
+    if original_language == "tr":
+        return "tr"
+    if original_language and original_language != "tr":
         return "en"
 
     country = str(parsed_filters.get("country") or "").strip().upper()
@@ -183,10 +157,8 @@ def decide_content_language(parsed_filters: Dict[str, Any], raw_query: str) -> s
         return "tr"
 
     q = (raw_query or "").lower()
-
     if any(token in q for token in TR_LANGUAGE_HINTS):
         return "tr"
-
     if any(token in q for token in FOREIGN_LANGUAGE_HINTS):
         return "en"
 
@@ -194,98 +166,15 @@ def decide_content_language(parsed_filters: Dict[str, Any], raw_query: str) -> s
 
 
 # ---------------------------------------------------------------------------
-# Çeviri yardımcıları
-# ---------------------------------------------------------------------------
-
-def _normalize_collab_score(raw_score: float) -> float:
-    return max(0.0, min(1.0, (raw_score - _SVD_MIN) / (_SVD_MAX - _SVD_MIN)))
-
-
-def _default_collab() -> float:
-    gm = float(_lite_model["global_mean"]) if _lite_model else 3.0
-    return _normalize_collab_score(gm)
-
-
-def _throttled_translate(text: str, target: str = "tr") -> str:
-    global _last_translate_time
-
-    if not text or not text.strip() or len(text.strip()) < 3:
-        return text
-
-    cache_key = (text.strip(), target)
-
-    if cache_key in _translation_cache:
-        return _translation_cache[cache_key]
-
-    elapsed = time.monotonic() - _last_translate_time
-    if elapsed < _TRANSLATE_DELAY:
-        time.sleep(_TRANSLATE_DELAY - elapsed)
-
-    try:
-        result = GoogleTranslator(source="auto", target=target).translate(text.strip())
-        translated = result if result and result.strip() else text
-    except Exception as exc:
-        logger.warning("Çeviri başarısız, orijinal kullanılacak. Hata: %s", exc)
-        translated = text
-    finally:
-        _last_translate_time = time.monotonic()
-
-    if len(_translation_cache) >= _CACHE_MAX:
-        keys_to_remove = list(_translation_cache.keys())[: _CACHE_MAX // 10]
-        for k in keys_to_remove:
-            del _translation_cache[k]
-
-    _translation_cache[cache_key] = translated
-    return translated
-
-
-def translate_to_turkish(text: str) -> str:
-    return _throttled_translate(text, target="tr")
-
-
-def translate_to_english(text: str) -> str:
-    return _throttled_translate(text, target="en")
-
-
-def batch_translate_to_turkish(texts: List[str]) -> List[str]:
-    return [translate_to_turkish(t) for t in texts]
-
-
-# ---------------------------------------------------------------------------
-# Filmleri toplu çevir
-# ---------------------------------------------------------------------------
-
-def batch_enrich_translations(films: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    enriched: List[Dict[str, Any]] = []
-
-    for film in films:
-        original_lang = film.get("original_language", "")
-
-        if original_lang == "tr":
-            turkish_title = film.get("original_title") or film.get("title", "")
-        else:
-            source_title = film.get("english_title") or film.get("title", "")
-            turkish_title = translate_to_turkish(source_title) if source_title else film.get("title", "")
-
-        overview_raw = film.get("overview", "")
-        overview_tr = overview_raw if original_lang == "tr" else translate_to_turkish(overview_raw)
-
-        tagline_raw = film.get("tagline", "")
-        tagline_tr = ""
-        if tagline_raw:
-            tagline_tr = tagline_raw if original_lang == "tr" else translate_to_turkish(tagline_raw)
-
-        film["_turkish_title"] = turkish_title
-        film["_overview_tr"] = overview_tr
-        film["_tagline_tr"] = tagline_tr
-        enriched.append(film)
-
-    return enriched
-
-
-# ---------------------------------------------------------------------------
 # Yardımcı fonksiyonlar
 # ---------------------------------------------------------------------------
+
+def tr_to_en(text: str) -> str:
+    try:
+        return GoogleTranslator(source="tr", target="en").translate(text)
+    except Exception as exc:
+        logger.warning("TR→EN çeviri hatası, orijinal sorgu kullanılacak: %s", exc)
+        return text
 
 def get_genre_names_tr(genre_ids: Any) -> List[str]:
     if not isinstance(genre_ids, list):
@@ -296,7 +185,6 @@ def get_genre_names_tr(genre_ids: Any) -> List[str]:
 def extract_youtube_url(videos: Any) -> Optional[str]:
     if not isinstance(videos, list):
         return None
-
     for priority in ("Trailer", "Teaser", None):
         for v in videos:
             if not isinstance(v, dict):
@@ -307,19 +195,16 @@ def extract_youtube_url(videos: Any) -> Optional[str]:
                 key = v.get("key")
                 if key:
                     return f"https://www.youtube.com/watch?v={key}"
-
     return None
 
 
 def format_runtime(runtime: Any) -> Optional[str]:
     if runtime is None:
         return None
-
     try:
         mins = int(runtime)
         if mins <= 0:
             return None
-
         h, m = divmod(mins, 60)
         if h and m:
             return f"{h} sa {m} dk"
@@ -330,11 +215,8 @@ def format_runtime(runtime: Any) -> Optional[str]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# DNA verisini güvenli parse et
-# ---------------------------------------------------------------------------
-
 def _parse_dna_field(raw: Any) -> Any:
+    """JSON string → list dönüşümü."""
     if raw is None:
         return None
     if isinstance(raw, (list, dict)):
@@ -351,6 +233,15 @@ def _parse_dna_field(raw: Any) -> Any:
     return None
 
 
+def _normalize_collab_score(raw_score: float) -> float:
+    return max(0.0, min(1.0, (raw_score - _SVD_MIN) / (_SVD_MAX - _SVD_MIN)))
+
+
+def _default_collab() -> float:
+    gm = float(_lite_model["global_mean"]) if _lite_model else 3.0
+    return _normalize_collab_score(gm)
+
+
 # ---------------------------------------------------------------------------
 # Supabase bağlantısı
 # ---------------------------------------------------------------------------
@@ -364,33 +255,19 @@ def get_supabase_client():
 
 
 # ---------------------------------------------------------------------------
-# DB filtreleri için yardımcılar
+# DB filtre limiti (tür/dil spesifikliğine göre)
 # ---------------------------------------------------------------------------
 
-def _extract_year(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    s = str(value).strip()
-    if len(s) >= 4 and s[:4].isdigit():
-        return int(s[:4])
-    return None
-
-
 def _dynamic_db_limit(filters: Dict[str, Any]) -> int:
-    """
-    Filtre ne kadar spesifikse havuzu biraz büyüt.
-    Çok genel sorguda daha küçük, spesifik sorguda biraz daha büyük çek.
-    """
     score = 0
-
     if filters.get("genre_ids"):
-        score += 1
+        score += 2
     if filters.get("exclude_genre_ids"):
         score += 1
     if filters.get("min_year") or filters.get("max_year"):
         score += 1
     if filters.get("original_language"):
-        score += 1
+        score += 2
     if filters.get("production_country"):
         score += 1
     if filters.get("min_runtime") or filters.get("max_runtime"):
@@ -400,19 +277,23 @@ def _dynamic_db_limit(filters: Dict[str, Any]) -> int:
     if filters.get("theme"):
         score += 1
 
-    if score >= 5:
-        return 700
+    if score >= 6:
+        return _DB_LIMIT_VERY_SPECIFIC
     if score >= 3:
-        return 500
-    return 300
+        return _DB_LIMIT_SPECIFIC
+    return _DB_LIMIT_DEFAULT
 
+
+# ---------------------------------------------------------------------------
+# Akıllı DB sorgusu (random değil, tür + dil ağırlıklı)
+# ---------------------------------------------------------------------------
 
 def _apply_db_filters(query, filters: Dict[str, Any]):
     """
-    DB seviyesinde güvenli uygulanabilecek filtreler:
-    - original_language
-    - release_date alt/üst
-    - runtime alt/üst
+    DB seviyesinde uygulanacak filtreler.
+    Tür filtresi DB'de doğrudan uygulanamaz (JSON array),
+    bu yüzden sadece dil + yıl + runtime DB'de filtrelenir;
+    tür filtreleme content_filter'da Python seviyesinde yapılır.
     """
     original_language = filters.get("original_language")
     if original_language:
@@ -437,6 +318,20 @@ def _apply_db_filters(query, filters: Dict[str, Any]):
     return query
 
 
+def _build_smart_order(filters: Dict[str, Any]):
+    """
+    Tür/mood varsa popularity+vote_average kombinasyonu,
+    rating_pref="high" ise vote_average önce,
+    rating_pref="popular" ise popularity önce.
+    """
+    rating_pref = filters.get("rating_pref")
+    if rating_pref == "high":
+        return [("vote_average", True), ("popularity", True)]
+    if rating_pref == "popular":
+        return [("popularity", True), ("vote_average", True)]
+    return [("popularity", True)]
+
+
 # ---------------------------------------------------------------------------
 # Supabase film çekme
 # ---------------------------------------------------------------------------
@@ -449,22 +344,30 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
 
     filters = normalize_filters(parsed_filters) or {}
     limit = _dynamic_db_limit(filters)
+    order_fields = _build_smart_order(filters)
 
     try:
         base_query = sb.table("movies").select(
-            "tmdb_id, imdb_id, title, english_title, original_title, overview, tagline, "
+            "tmdb_id, imdb_id, title, english_title, original_title, "
+            "overview, overview_tr, tagline, tagline_tr, "
             "genres, genre_ids, keywords, vote_average, vote_count, popularity, "
             "poster_path, videos, release_date, runtime, original_language, "
             "credits, production_countries"
         )
 
         base_query = _apply_db_filters(base_query, filters)
-        base_query = base_query.order("popularity", desc=True).limit(limit)
+
+        # Akıllı sıralama: çok sütunlu sıralama Supabase'de tek sütun desteklediğinden
+        # ilk alanı kullan (en kritik olan)
+        primary_order, primary_desc = order_fields[0]
+        base_query = base_query.order(primary_order, desc=primary_desc).limit(limit)
 
         rows = getattr(base_query.execute(), "data", None) or []
         if not rows:
+            logger.info("DB'den 0 film döndü. Filtreler: %s", filters)
             return []
 
+        # TMDB ID listesi çıkar
         tmdb_ids: List[int] = []
         for row in rows:
             raw_id = row.get("tmdb_id")
@@ -474,16 +377,16 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                 except (TypeError, ValueError):
                     continue
 
+        # film_dna: dna_vector + emotion_curve + color_palette
         dna_dict: Dict[int, Dict[str, Any]] = {}
         if tmdb_ids:
             dna_res = (
                 sb.table("film_dna")
-                .select("tmdb_id, emotion_curve, color_palette")
+                .select("tmdb_id, dna_vector, emotion_curve, color_palette")
                 .in_("tmdb_id", tmdb_ids)
                 .execute()
             )
             dna_rows = getattr(dna_res, "data", []) or []
-
             for dna in dna_rows:
                 tid = dna.get("tmdb_id")
                 if tid is not None:
@@ -492,12 +395,10 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                     except (TypeError, ValueError):
                         continue
 
-            logger.info(
-                "movies=%d | dna=%d | filtreler=%s",
-                len(rows),
-                len(dna_dict),
-                filters,
-            )
+        logger.info(
+            "DB'den çekilen: movies=%d | dna=%d | filtreler=%s",
+            len(rows), len(dna_dict), filters,
+        )
 
         movies: List[Dict[str, Any]] = []
         for row in rows:
@@ -517,6 +418,9 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                 "english_title": row.get("english_title", ""),
                 "original_title": row.get("original_title", ""),
                 "overview": row.get("overview", ""),
+                "overview_tr": row.get("overview_tr", "") or "",
+                "tagline": row.get("tagline", ""),
+                "tagline_tr": row.get("tagline_tr", "") or "",
                 "genre_ids": row.get("genre_ids") or [],
                 "genres": row.get("genres") or [],
                 "keywords": row.get("keywords") or [],
@@ -531,7 +435,8 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                 "release_date": row.get("release_date", ""),
                 "runtime": row.get("runtime"),
                 "original_language": row.get("original_language", ""),
-                "tagline": row.get("tagline", ""),
+                # DNA alanları
+                "dna_vector": _parse_dna_field(dna_data.get("dna_vector")),
                 "emotion_curve": _parse_dna_field(dna_data.get("emotion_curve")),
                 "color_palette": _parse_dna_field(dna_data.get("color_palette")),
             })
@@ -544,21 +449,21 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# Kullanıcının etkileştiği filmler
+# Kullanıcının izlediği filmler
 # ---------------------------------------------------------------------------
 
 def get_user_watched_movie_ids(user_id: int) -> Set[int]:
     sb = get_supabase_client()
     if sb is None:
         return set()
-
     try:
         rows = getattr(
-            sb.table("user_prefs").select("movie_id").eq("user_id", user_id).execute(),
-            "data",
-            [],
+            sb.table("user_prefs")
+            .select("movie_id")
+            .eq("user_id", user_id)
+            .execute(),
+            "data", [],
         ) or []
-
         watched: Set[int] = set()
         for row in rows:
             movie_id = row.get("movie_id")
@@ -567,7 +472,6 @@ def get_user_watched_movie_ids(user_id: int) -> Set[int]:
                     watched.add(int(movie_id))
                 except (TypeError, ValueError):
                     continue
-
         return watched
     except Exception as exc:
         logger.warning("İzlenen filmler çekilemedi: %s", exc)
@@ -578,7 +482,12 @@ def get_user_watched_movie_ids(user_id: int) -> Set[int]:
 # Hybrid skor uygulama
 # ---------------------------------------------------------------------------
 
-def apply_hybrid_scores(user_id: int, content_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def apply_hybrid_scores(
+    user_id: int,
+    content_results: List[Dict[str, Any]],
+    dna_query_vector: Optional[List[float]] = None,
+    parsed_filters: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     if not content_results:
         return []
 
@@ -600,7 +509,12 @@ def apply_hybrid_scores(user_id: int, content_results: List[Dict[str, Any]]) -> 
 
     for film in content_results:
         film_id = int(film["id"]) if film.get("id") is not None else None
-        svd_raw = float(svd_scores.get(film_id, float(_lite_model["global_mean"]) if _lite_model else 3.0))
+        svd_raw = float(
+            svd_scores.get(
+                film_id,
+                float(_lite_model["global_mean"]) if _lite_model else 3.0
+            )
+        )
 
         candidates.append({
             **film,
@@ -611,31 +525,38 @@ def apply_hybrid_scores(user_id: int, content_results: List[Dict[str, Any]]) -> 
             "svd_score_raw": round(svd_raw, 4),
         })
 
-    return ranker.rank_candidates(candidates)
+    return ranker.rank_candidates(
+        candidates,
+        query_vector=dna_query_vector,
+        filters=parsed_filters,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Kullanıcıya Türkçe sunum
+# Kullanıcıya sunum (çeviri yok — DB'den TR alanlar)
 # ---------------------------------------------------------------------------
 
 def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
     film_id = film.get("movie_id") or film.get("id")
     original_lang = film.get("original_language", "")
-    original_title = film.get("original_title") or film.get("title", "")
 
-    turkish_title = film.get("_turkish_title") or translate_to_turkish(
-        film.get("english_title") or film.get("title", "")
-    )
-    overview_tr = film.get("_overview_tr") or (
-        film.get("overview", "") if original_lang == "tr"
-        else translate_to_turkish(film.get("overview", ""))
-    )
+    # Başlık: TR film → original_title, yabancı → english_title ya da title
+    if original_lang == "tr":
+        display_title = film.get("original_title") or film.get("title", "")
+    else:
+        display_title = film.get("english_title") or film.get("original_title") or film.get("title", "")
 
-    tagline_raw = film.get("tagline", "")
-    tagline_tr = film.get("_tagline_tr") or (
-        tagline_raw if original_lang == "tr"
-        else translate_to_turkish(tagline_raw)
-    ) if tagline_raw else ""
+    # Özet: DB'den gelen overview_tr (yabancı filmler için), TR filmler için overview
+    if original_lang == "tr":
+        overview_display = film.get("overview", "")
+    else:
+        overview_display = film.get("overview_tr") or film.get("overview", "")
+
+    # Tagline: DB'den gelen tagline_tr (yabancı filmler için), TR filmler için tagline
+    if original_lang == "tr":
+        tagline_display = film.get("tagline", "")
+    else:
+        tagline_display = film.get("tagline_tr") or film.get("tagline", "") or ""
 
     genre_ids = film.get("genre_ids") or []
     genres_tr = get_genre_names_tr(genre_ids)
@@ -653,6 +574,7 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
+    # Emotion curve güvenli dönüşüm
     raw_curve = film.get("emotion_curve")
     safe_emotion_curve: List[float] = []
     try:
@@ -662,10 +584,10 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
             safe_emotion_curve = [float(v) for v in raw_curve]
         else:
             safe_emotion_curve = [0.0] * 10
-    except Exception as exc:
-        logger.warning("emotion_curve parse hatası: %s | raw: %s", exc, raw_curve)
+    except Exception:
         safe_emotion_curve = [0.0] * 10
 
+    # Color palette güvenli dönüşüm
     raw_palette = film.get("color_palette")
     safe_color_palette: List[str] = []
     try:
@@ -675,38 +597,31 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
         if isinstance(raw_palette, list) and len(raw_palette) > 0:
             for item in raw_palette:
                 if isinstance(item, list) and len(item) == 3:
-                    r = int(float(item[0]))
-                    g = int(float(item[1]))
-                    b = int(float(item[2]))
+                    r, g, b = int(float(item[0])), int(float(item[1])), int(float(item[2]))
                     safe_color_palette.append(f"rgb({r},{g},{b})")
                 elif isinstance(item, str) and item.strip().startswith("["):
                     try:
                         inner = json.loads(item)
                         if isinstance(inner, list) and len(inner) == 3:
-                            r = int(float(inner[0]))
-                            g = int(float(inner[1]))
-                            b = int(float(inner[2]))
+                            r, g, b = int(float(inner[0])), int(float(inner[1])), int(float(inner[2]))
                             safe_color_palette.append(f"rgb({r},{g},{b})")
                     except Exception:
                         safe_color_palette.append(item.strip())
                 elif isinstance(item, str) and item.strip():
                     safe_color_palette.append(item.strip())
-                else:
-                    safe_color_palette.append(str(item))
         else:
             safe_color_palette = ["#2D3748", "#4A5568", "#718096"]
-
-    except Exception as exc:
-        logger.warning("color_palette parse hatası: %s | raw: %s", exc, raw_palette)
+    except Exception:
         safe_color_palette = ["#2D3748", "#4A5568", "#718096"]
 
     return {
         "movie_id": film_id,
         "imdb_id": imdb_id,
-        "original_title": original_title,
-        "turkish_title": turkish_title,
-        "overview_tr": overview_tr,
-        "tagline_tr": tagline_tr,
+        "original_title": film.get("original_title", ""),
+        "english_title": film.get("english_title", ""),
+        "display_title": display_title,
+        "overview_display": overview_display,
+        "tagline_display": tagline_display,
         "genres_tr": genres_tr,
         "genre_ids": genre_ids,
         "imdb_score": imdb_score,
@@ -739,9 +654,8 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
 async def health():
     return {
         "status": "ok",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "svd_loaded": _lite_model is not None,
-        "cache_size": len(_translation_cache),
     }
 
 
@@ -751,15 +665,26 @@ async def search(
     user_id: int = Query(1, description="Kişiselleştirme için kullanıcı ID"),
 ):
     try:
+        # 1. AI parser → filtreler + dna_query_vector
         parsed_filters = parse_query_with_ai(q)
-        content_language = decide_content_language(parsed_filters, q)
+        dna_query_vector: Optional[List[float]] = parsed_filters.get("dna_query_vector")
 
+        # 2. İçerik dili kararı
+        content_language = decide_content_language(parsed_filters, q)
+        logger.info("content_language=%s | query='%s'", content_language, q)
+
+        # 3. DB'den akıllı film çekme
         candidate_movies = fetch_movies_from_source(parsed_filters)
 
+        # 4. İzlenmiş filmleri çıkar
         watched_ids = get_user_watched_movie_ids(user_id)
         if watched_ids:
+            before = len(candidate_movies)
             candidate_movies = [m for m in candidate_movies if m.get("id") not in watched_ids]
-            logger.info("Kullanıcı %d için %d izlenmiş film filtrelendi.", user_id, len(watched_ids))
+            logger.info(
+                "Kullanıcı %d için %d film filtrelendi (izlendi).",
+                user_id, before - len(candidate_movies),
+            )
 
         if not candidate_movies:
             return {
@@ -768,6 +693,9 @@ async def search(
                 "results": [],
             }
 
+        # 5. Content filter (TF-IDF) — çeviri fonksiyonu artık yok
+        translate_callable = tr_to_en if content_language == "en" else None
+
         enriched_query, content_results = get_recommendations_from_list(
             raw_query=q,
             movies_list=candidate_movies,
@@ -775,20 +703,29 @@ async def search(
             content_language=content_language,
             top_n=CONTENT_TOP_N,
             include_credits=False,
+            translate_fn=translate_callable,
         )
-        logger.info("Content filter: %d sonuç | sorgu: '%s'", len(content_results), enriched_query)
+        logger.info("Content filter: %d sonuç | enriched_query='%s'", len(content_results), enriched_query)
 
-        final_results = apply_hybrid_scores(user_id, content_results)
+        # 6. Hybrid skor (collab + DNA)
+        final_results = apply_hybrid_scores(
+            user_id=user_id,
+            content_results=content_results,
+            dna_query_vector=dna_query_vector,
+            parsed_filters=parsed_filters,
+        )
 
-        # Önce final sayıyı sınırla
+        # 7. Sonuç sayısını sınırla
         final_results = final_results[:FINAL_TOP_N]
 
-        # Sonra why text üret
+        # 8. Tür isimlerini ekle (why_text için)
+        for film in final_results:
+            film["genres_tr"] = get_genre_names_tr(film.get("genre_ids") or [])
+
+        # 9. Why text üret
         ai_reasons = generate_batch_why_texts(final_results, parsed_filters) or []
 
-        # Sonra çevirileri yap
-        final_results = batch_enrich_translations(final_results)
-
+        # 10. Görüntüleme için zenginleştir
         display_results: List[Dict[str, Any]] = []
         for i, film in enumerate(final_results):
             reason = ai_reasons[i] if i < len(ai_reasons) else "Senin için özenle seçildi."
@@ -817,8 +754,8 @@ async def search(
 
 @app.post("/feedback")
 async def feedback(
-    user_id: int = Query(..., description="Aksiyonu yapan kullanıcının ID'si"),
-    film_id: int = Query(..., description="Oylanan filmin TMDB/Sistem ID'si"),
+    user_id: int = Query(..., description="Kullanıcı ID"),
+    film_id: int = Query(..., description="Film TMDB ID"),
     action: str = Query(..., description="'like', 'dislike' veya 'watched'"),
 ):
     try:
@@ -826,9 +763,10 @@ async def feedback(
         if sb is None:
             return {"status": "error", "message": "Veritabanı bağlantı bilgileri eksik."}
 
-        if action.lower() == "like":
+        action_lower = action.lower()
+        if action_lower == "like":
             pref_value = 1
-        elif action.lower() == "dislike":
+        elif action_lower == "dislike":
             pref_value = -1
         else:
             pref_value = 0
@@ -838,7 +776,6 @@ async def feedback(
             "movie_id": film_id,
             "preference": pref_value,
         }
-
         sb.table("user_prefs").upsert(data).execute()
 
         return {
@@ -850,4 +787,31 @@ async def feedback(
 
     except Exception as exc:
         logger.error("Feedback kaydetme hatası: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
+@app.get("/movie/{tmdb_id}")
+async def get_movie(tmdb_id: int):
+    """Tek film detayı."""
+    try:
+        sb = get_supabase_client()
+        if sb is None:
+            return {"status": "error", "message": "Veritabanı bağlantısı yok."}
+
+        rows = getattr(
+            sb.table("movies")
+            .select("*")
+            .eq("tmdb_id", tmdb_id)
+            .limit(1)
+            .execute(),
+            "data", [],
+        ) or []
+
+        if not rows:
+            return {"status": "error", "message": "Film bulunamadı."}
+
+        return make_json_safe({"status": "ok", "movie": rows[0]})
+
+    except Exception as exc:
+        logger.error("Movie detail hatası: %s", exc)
         return {"status": "error", "message": str(exc)}

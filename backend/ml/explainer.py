@@ -1,67 +1,142 @@
-import os
+"""
+ml/explainer.py — CUE Why-Text Generator v0.6.0
+
+Değişiklikler:
+- Model llama-3.3-70b-versatile (daha iyi)
+- Hata durumunda temiz fallback (skor/teknik dil yok)
+- JSON yanıt parsing daha sağlam
+"""
+
 import json
+import logging
+from typing import Any, Dict, List, Optional
+
 from groq import Groq
-from typing import List, Dict, Any
+import os
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+logger = logging.getLogger(__name__)
 
-def generate_batch_why_texts(movies: List[Dict[str, Any]], parsed_filters: Dict[str, Any]) -> List[str]:
+_groq_client: Optional[Groq] = None
+
+
+def _get_client() -> Groq:
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _groq_client
+
+
+def generate_batch_why_texts(
+    movies: List[Dict[str, Any]],
+    parsed_filters: Dict[str, Any],
+) -> List[str]:
     if not movies:
         return []
 
-    # Film listesini hazırlıyoruz (Skor YOK)
     movie_list_str = ""
     for i, m in enumerate(movies):
-        title = m.get("turkish_title") or m.get("original_title")
-        genres = ", ".join(m.get("genres_tr", []))
-        movie_list_str += f"{i+1}. {title} (Tür: {genres})\n"
+        title = (
+            m.get("original_title")
+            or m.get("english_title")
+            or m.get("title", "")
+        )
+        genres = ", ".join(m.get("genres_tr") or [])
+        year = m.get("release_year", "")
+        movie_list_str += f"{i + 1}. {title} ({year}) — Tür: {genres}\n"
 
     mood = parsed_filters.get("mood")
-    
-    # Prompt stratejisi: Mood varsa ona odaklan, yoksa filmin kalitesine/türüne odaklan
-    if mood:
-        context_text = f'Kullanıcı şu an tam olarak "{mood}" atmosferinde, bu hissi verecek bir film arıyor.'
-    else:
-        context_text = "Kullanıcı yeni ve etkileyici bir film keşfetmek istiyor. Algoritma/skor dili kullanmadan, doğrudan filmin türündeki gücüne ve kalitesine odaklan."
+    themes = parsed_filters.get("theme") or []
+    rating_pref = parsed_filters.get("rating_pref")
 
-    prompt = f"""
-    Sen Q-NAV film öneri sisteminin zeki ve sinemasever asistanısın. 
-    {context_text}
-    
-    Aşağıdaki film listesi için her filme özel, kullanıcıyı izlemeye ikna edecek, 
-    samimi ve kısa (max 10-12 kelime) birer "neden önerildi" cümlesi yaz.
-    
-    KURALLAR:
-    - Cümleler "Çünkü" ile BAŞLAMASIN.
-    - İçinde yüzde, skor, puan veya "uyumlu" gibi teknik kelimeler GEÇMESİN.
-    - Doğrudan filmin atmosferini veya türünü öv.
-    
-    Filmler:
-    {movie_list_str}
-    
-    Yanıtı SADECE şu formatta bir JSON listesi olarak ver: ["cümle1", "cümle2", ...]
-    """
+    context_parts = []
+    if mood:
+        context_parts.append(f'"{mood}" atmosferi')
+    if themes:
+        context_parts.append(f'{", ".join(themes)} teması')
+    if rating_pref == "high":
+        context_parts.append("kaliteli/ödüllü yapım")
+    elif rating_pref == "popular":
+        context_parts.append("popüler yapım")
+
+    if context_parts:
+        context_text = (
+            f"Kullanıcı şunları arıyor: {', '.join(context_parts)}. "
+            "Her film için bu bağlamı yansıtan kısa bir neden yaz."
+        )
+    else:
+        context_text = (
+            "Kullanıcı yeni ve etkileyici bir film arıyor. "
+            "Her film için filmin güçlü yanını öne çıkaran kısa bir neden yaz."
+        )
+
+    prompt = f"""Sen CUE film öneri sisteminin sinemasever asistanısın.
+{context_text}
+
+Aşağıdaki her film için kullanıcıyı izlemeye ikna edecek, samimi, kısa (max 12 kelime) Türkçe bir cümle yaz.
+
+KURALLAR (çok önemli):
+1. Cümle "Çünkü" ile başlamayacak.
+2. Yüzde, puan, skor, "uyumlu", "algoritma" gibi teknik kelimeler GEÇMEYECEK.
+3. Cümle Türkçe olacak.
+4. Filmler arası tekrar olmayacak, her cümle özgün olacak.
+5. Filmin tür/atmosfer/konusunu yansıtacak.
+
+Filmler:
+{movie_list_str}
+
+Yanıtı SADECE bu JSON formatında ver (başka hiçbir şey ekleme):
+{{"reasons": ["1. film için cümle", "2. film için cümle", ...]}}"""
 
     try:
+        client = _get_client()
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.7
+            temperature=0.75,
+            max_tokens=800,
         )
-        
-        response_data = json.loads(completion.choices[0].message.content)
-        if isinstance(response_data, dict):
-            return list(response_data.values())[0] 
-        return response_data
-    except Exception as e:
-        print(f"Groq API Hatası: {e}")
-        # Hata durumunda (Fallback) skorsuz, temiz yedek cümleler
-        fallbacks = []
-        for m in movies:
-            genre = m.get("genres_tr", ["Sinema"])[0]
-            if mood:
-                fallbacks.append(f"{mood} atmosferini mükemmel yansıtan etkileyici bir {genre} yapımı.")
+
+        raw = completion.choices[0].message.content.strip()
+        data = json.loads(raw)
+
+        # Farklı JSON yapılarını destekle
+        if isinstance(data, dict):
+            # {"reasons": [...]}
+            if "reasons" in data and isinstance(data["reasons"], list):
+                reasons = data["reasons"]
             else:
-                fallbacks.append(f"{genre} türünün dikkat çeken, sürükleyici örneklerinden biri.")
-        return fallbacks
+                # İlk list değeri ne ise onu al
+                reasons = next(
+                    (v for v in data.values() if isinstance(v, list)),
+                    list(data.values()),
+                )
+        elif isinstance(data, list):
+            reasons = data
+        else:
+            raise ValueError(f"Beklenmedik JSON yapısı: {type(data)}")
+
+        # Eksik açıklamaları doldur
+        result: List[str] = []
+        for i, m in enumerate(movies):
+            if i < len(reasons) and isinstance(reasons[i], str) and reasons[i].strip():
+                result.append(reasons[i].strip())
+            else:
+                result.append(_fallback_reason(m, mood))
+
+        return result
+
+    except json.JSONDecodeError as exc:
+        logger.error("Explainer JSON parse hatası: %s", exc)
+    except Exception as exc:
+        logger.error("Explainer hatası: %s", exc)
+
+    return [_fallback_reason(m, mood) for m in movies]
+
+
+def _fallback_reason(movie: Dict[str, Any], mood: Optional[str] = None) -> str:
+    genres = movie.get("genres_tr") or []
+    genre = genres[0] if genres else "Sinema"
+    if mood:
+        return f"{mood.capitalize()} atmosferi arayanlar için özenle seçilmiş bir {genre} yapımı."
+    return f"{genre} türünün sürükleyici ve dikkat çeken örneklerinden biri."
