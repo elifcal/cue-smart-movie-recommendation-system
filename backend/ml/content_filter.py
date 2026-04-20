@@ -19,13 +19,6 @@ Parser çıktısı yapısı (ai_parser.py şeması ile tam uyumlu):
     "original_language": str | None,
     "country": str | None,
 }
-
-Düzeltmeler:
-- english_title combined metne dahil edildi (TF-IDF eşleşmesi için)
-- tagline combined metne dahil edildi
-- rank_movies çıktısı: videos, english_title, tagline alanları eklendi
-  (main.py enrich_for_display bu alanları kullanıyor)
-- tmdb_score alanı vote_average'den üretiliyor (ranker bunu bekliyor)
 """
 
 from __future__ import annotations
@@ -182,7 +175,6 @@ def _dynamic_min_vote_count(pool_size: int) -> int:
 # ---------------------------------------------------------------------------
 
 def normalize_filters(raw_filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """ai_parser çıktısını content_filter iç sözleşmesine dönüştürür."""
     if not raw_filters:
         return raw_filters
 
@@ -367,6 +359,8 @@ def prepare_df(
         "release_date": "", "runtime": None, "original_language": "",
         "adult": False, "poster_path": None, "videos": None,
         "imdb_id": None, "release_dates": None,
+        # *** DÜZELTME: emotion_curve ve color_palette default olarak eklendi ***
+        "emotion_curve": None, "color_palette": None,
     }
     for col, default in defaults.items():
         if col not in df.columns:
@@ -375,11 +369,11 @@ def prepare_df(
     for col in ("title", "english_title", "original_title", "overview", "tagline"):
         df[col] = df[col].apply(clean_text)
 
-    df["title_clean"]         = df["title"].apply(clean_text_lower)
-    df["english_title_clean"] = df["english_title"].apply(clean_text_lower)
-    df["original_title_clean"]= df["original_title"].apply(clean_text_lower)
-    df["overview_clean"]      = df["overview"].apply(clean_text_lower)
-    df["tagline_clean"]       = df["tagline"].apply(clean_text_lower)
+    df["title_clean"]          = df["title"].apply(clean_text_lower)
+    df["english_title_clean"]  = df["english_title"].apply(clean_text_lower)
+    df["original_title_clean"] = df["original_title"].apply(clean_text_lower)
+    df["overview_clean"]       = df["overview"].apply(clean_text_lower)
+    df["tagline_clean"]        = df["tagline"].apply(clean_text_lower)
 
     df["genres_from_objects"] = df["genres"].apply(parse_genres_from_objects)
     df["genres_from_ids"]     = df["genre_ids"].apply(
@@ -389,22 +383,22 @@ def prepare_df(
         lambda row: row["genres_from_objects"] or row["genres_from_ids"], axis=1
     )
 
-    df["keywords_str"]        = df["keywords"].apply(parse_keywords)
-    df["countries_str"]       = df["production_countries"].apply(parse_production_countries)
-    df["spoken_languages_str"]= df["spoken_languages"].apply(parse_spoken_languages)
-    df["credits_str"]         = df["credits"].apply(
+    df["keywords_str"]         = df["keywords"].apply(parse_keywords)
+    df["countries_str"]        = df["production_countries"].apply(parse_production_countries)
+    df["spoken_languages_str"] = df["spoken_languages"].apply(parse_spoken_languages)
+    df["credits_str"]          = df["credits"].apply(
         lambda c: parse_credits(c, include_credits=include_credits)
     )
-    df["country_codes"]       = df["production_countries"].apply(_extract_country_codes)
+    df["country_codes"] = df["production_countries"].apply(_extract_country_codes)
 
     df["combined"] = (
         (df["title_clean"]          + " ") * 2 +
-        (df["english_title_clean"]  + " ") * 2 +   # ← eklendi
+        (df["english_title_clean"]  + " ") * 2 +
         (df["original_title_clean"] + " ") * 1 +
         (df["genres_str"]           + " ") * 3 +
         (df["keywords_str"]         + " ") * 3 +
         (df["overview_clean"]       + " ") * 1 +
-        (df["tagline_clean"]        + " ") * 1 +   # ← eklendi
+        (df["tagline_clean"]        + " ") * 1 +
         (df["countries_str"]        + " ") * 1 +
         (df["spoken_languages_str"] + " ") * 1 +
         (df["credits_str"]          + " ") * 1
@@ -478,17 +472,17 @@ def build_enriched_query(
         return processed_query.strip()
 
     extra: List[str] = []
-    mood: Optional[str]      = filters.get("mood")
-    excluded_moods: List[str]= filters.get("excluded_moods") or []
-    themes: List[str]        = filters.get("theme") or []
+    mood: Optional[str]       = filters.get("mood")
+    excluded_moods: List[str] = filters.get("excluded_moods") or []
+    themes: List[str]         = filters.get("theme") or []
     rating_pref: Optional[str]= filters.get("rating_pref")
-    low_violence: bool       = bool(filters.get("low_violence"))
-    high_violence: bool      = bool(filters.get("high_violence"))
+    low_violence: bool        = bool(filters.get("low_violence"))
+    high_violence: bool       = bool(filters.get("high_violence"))
 
-    mood_map     = MOOD_MAP_TR     if content_language == "tr" else MOOD_MAP_EN
-    theme_map    = THEME_MAP_TR    if content_language == "tr" else THEME_MAP_EN
+    mood_map     = MOOD_MAP_TR        if content_language == "tr" else MOOD_MAP_EN
+    theme_map    = THEME_MAP_TR       if content_language == "tr" else THEME_MAP_EN
     rating_map   = RATING_PREF_MAP_TR if content_language == "tr" else RATING_PREF_MAP_EN
-    violence_map = VIOLENCE_MAP_TR if content_language == "tr" else VIOLENCE_MAP_EN
+    violence_map = VIOLENCE_MAP_TR    if content_language == "tr" else VIOLENCE_MAP_EN
 
     if mood and mood not in excluded_moods:
         extra.append(mood_map.get(mood, mood))
@@ -621,13 +615,13 @@ def rank_movies(
         results.append({
             "id":                   row.get("id"),
             "title":                row.get("title", ""),
-            "english_title":        row.get("english_title", ""),   # ← eklendi
+            "english_title":        row.get("english_title", ""),
             "original_title":       row.get("original_title", ""),
             "overview":             row.get("overview", ""),
-            "tagline":              row.get("tagline", ""),         # ← eklendi
+            "tagline":              row.get("tagline", ""),
             "genres":               row.get("genres_str", ""),
             "content_score":        round(score, 4),
-            "tmdb_score":           float(row.get("vote_average") or 0.0),  # ranker için
+            "tmdb_score":           float(row.get("vote_average") or 0.0),
             "vote_count":           int(row.get("vote_count") or 0),
             "popularity":           float(row.get("popularity") or 0.0),
             "release_date":         row.get("release_date", ""),
@@ -635,7 +629,7 @@ def rank_movies(
             "original_language":    row.get("original_language", ""),
             "adult":                bool(row.get("adult", False)),
             "poster_path":          row.get("poster_path"),
-            "videos":               row.get("videos"),              # ← eklendi (YouTube için)
+            "videos":               row.get("videos"),
             "imdb_id":              row.get("imdb_id"),
             "genre_ids":            row.get("genre_ids"),
             "keywords":             row.get("keywords"),
@@ -643,6 +637,9 @@ def rank_movies(
             "spoken_languages":     row.get("spoken_languages"),
             "credits":              row.get("credits"),
             "release_dates":        row.get("release_dates"),
+            # *** DÜZELTME: Bu iki alan eksikti, artık aktarılıyor ***
+            "emotion_curve":        row.get("emotion_curve"),
+            "color_palette":        row.get("color_palette"),
         })
         if len(results) == top_n:
             break

@@ -6,23 +6,17 @@ Scoring:
   DNA yoksa:  content*0.45 + collab*0.40 + tmdb*0.15
 
 Düzeltmeler (v0.4.2):
-- HybridRanker sınıfı düzgün export ediliyor
-- film_dna tablosunda dna_score kolonu yoksa sessizce None döndürülüyor
-  (hata loglanıyor ama 400 exception yutuluyor)
-- build_pipeline_candidates: collaborative_lite import güncellendi
+- get_dna_score: artık her film için ayrı Supabase isteği ATMIYOR.
+  emotion_curve zaten main.py'da fetch_movies_from_source içinde
+  film_dna tablosundan toplu çekilip filme ekleniyor.
+  Ranker bu veriyi candidate dict'ten okur, Supabase'e dokunmaz.
+- dna_score: emotion_curve listesinin ortalaması alınarak hesaplanır.
 """
 
 from __future__ import annotations
 
-import os
 import logging
 from typing import Any, Dict, List, Optional
-
-try:
-    from supabase import create_client, Client
-except ImportError:
-    create_client = None
-    Client = Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,31 +34,12 @@ class HybridRanker:
 
     Beklenen aday formatı:
     {
-        "tmdb_id":            int,
         "content_score":       float,  # [0, 1]
         "collaborative_score": float,  # [0, 1]
         "tmdb_score":          float,  # [0, 10] — burada normalize edilir
+        "emotion_curve":       list | None,  # main.py'dan gelir
     }
     """
-
-    def __init__(self) -> None:
-        self.supabase: Optional[Client] = self._init_supabase()
-        self._dna_disabled = False  # film_dna tablosu hatalı dönünce kalıcı devre dışı
-
-    def _init_supabase(self) -> Optional[Client]:
-        if create_client is None:
-            logger.warning("supabase paketi yüklü değil. DNA devre dışı.")
-            return None
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-        if not url or not key:
-            logger.warning("SUPABASE env eksik. DNA devre dışı.")
-            return None
-        try:
-            return create_client(url, key)
-        except Exception as exc:
-            logger.exception("Supabase client başlatılamadı: %s", exc)
-            return None
 
     @staticmethod
     def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -80,41 +55,41 @@ class HybridRanker:
     def normalize_tmdb_score(self, v: Any) -> float:
         return self._clamp(self._safe_float(v) / 10.0)
 
-    def get_dna_score(self, tmdb_id: Any) -> Optional[float]:
+    def get_dna_score(self, candidate: Dict[str, Any]) -> Optional[float]:
         """
-        film_dna tablosundan skor çeker.
-        Tablo henüz hazır değilse (kolon yok / tablo yok) → None döner,
-        DNA devre dışı bırakılır ve sonraki isteklerde tekrar denenmez.
+        emotion_curve listesinden dna_score üretir.
+        Supabase'e istek ATMAZ — veri zaten candidate dict içinde gelir.
+
+        emotion_curve değerleri küçük float'lar (0.0 - 0.1 arası tipik).
+        Bunları normalize edip [0,1] aralığına çekeriz.
         """
-        if self.supabase is None or tmdb_id is None or self._dna_disabled:
+        raw_curve = candidate.get("emotion_curve")
+
+        if not isinstance(raw_curve, list) or len(raw_curve) == 0:
             return None
+
         try:
-            resp = (
-                self.supabase
-                .table("film_dna")
-                .select("*")           # önce tüm kolonları çek, hangisi var bilmiyoruz
-                .eq("tmdb_id", int(tmdb_id))
-                .limit(1)
-                .execute()
-            )
-            data = getattr(resp, "data", None)
-            if not data:
-                return None
-            row = data[0]
-            # Olası kolon adlarını dene
-            for col in ("dna_score", "score", "value"):
-                if col in row and row[col] is not None:
-                    return self._clamp(self._safe_float(row[col]))
+            values = [float(v) for v in raw_curve]
+        except (TypeError, ValueError):
             return None
-        except Exception as exc:
-            err_msg = str(exc)
-            if "does not exist" in err_msg or "42703" in err_msg or "42P01" in err_msg:
-                # Kolon/tablo yok — bir daha deneme, sessizce kapat
-                logger.warning("film_dna tablosu/kolonu hazır değil, DNA devre dışı: %s", exc)
-                self._dna_disabled = True
-            else:
-                logger.warning("DNA skor alımı başarısız, tmdb_id=%s: %s", tmdb_id, exc)
+
+        if not values:
             return None
+
+        # Tüm değerler 0 ise DNA yok sayılır
+        if all(v == 0.0 for v in values):
+            return None
+
+        avg = sum(values) / len(values)
+        max_val = max(values)
+
+        # max_val ile normalize et (0-1 aralığına çek)
+        if max_val > 0:
+            normalized = avg / max_val
+        else:
+            normalized = 0.0
+
+        return self._clamp(normalized)
 
     def compute_hybrid_score(
         self,
@@ -134,8 +109,8 @@ class HybridRanker:
         return round(content * 0.45 + collab * 0.40 + tmdb * 0.15, 6)
 
     def enrich_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        tmdb_id  = candidate.get("tmdb_id") or candidate.get("id")
-        dna_score = self.get_dna_score(tmdb_id)
+        # *** DÜZELTME: Supabase'e istek yok, candidate'den oku ***
+        dna_score = self.get_dna_score(candidate)
         hybrid    = self.compute_hybrid_score(
             content_score       = candidate.get("content_score", 0.0),
             collaborative_score = candidate.get("collaborative_score", 0.0),
