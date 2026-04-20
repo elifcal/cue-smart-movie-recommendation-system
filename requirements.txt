@@ -8,7 +8,6 @@ typing_extensions==4.12.2
 numpy==1.26.4
 jsonpointer==3.0.0
 pandas==2.2.3
-requests==2.33.1
 googleapis-common-protos==1.68.0
 transformers==4.49.0
 fastapi==0.135.3

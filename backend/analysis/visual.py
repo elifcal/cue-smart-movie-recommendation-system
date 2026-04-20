@@ -4,6 +4,9 @@ import colorsys
 from io import BytesIO
 from colorthief import ColorThief
 
+from dotenv import load_dotenv
+load_dotenv()
+
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w185"
 
@@ -105,7 +108,7 @@ def analyze_visual(tmdb_id: int, poster_path: str) -> dict:
     return {
         "film_id":       tmdb_id,
         "dominant_renk": renkler["dominant"],
-        "renk_paleti":   palette,
+        "color_palette": [[int(x) for x in r] for r in palette],
         "brightness":    parlaklik_hesapla(palette),
         "saturation":    doygunluk_hesapla(palette),
         "warmth":        sicaklik_hesapla(palette),
