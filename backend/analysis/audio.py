@@ -57,7 +57,6 @@ def analyze_audio(mp3_yolu, model, sure=60, language=None):
     text = sonuc["text"]
     algilanan_dil = sonuc.get("language")
     dil_uyumsuzlugu = None
-    
     if language and algilanan_dil and algilanan_dil != language:
      uyari = f"Dil uyuşmazlığı: TMDB={language}, Whisper={algilanan_dil}"
      print(f"⚠️  {uyari}")
