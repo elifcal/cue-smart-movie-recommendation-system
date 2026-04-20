@@ -57,9 +57,17 @@ except Exception as exc:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Cue API", version="0.4.2")
+
+# İzin verilen adresleri bir liste olarak tanımlıyoruz
+origins = [
+    "https://cue-smart-movie-recommendation-syst-orpin.vercel.app",
+    "http://localhost:3000"  # Lokal testler için (gerekliyse)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,     # YILDIZ YERİNE BURAYI DEĞİŞTİRDİK
+    allow_credentials=True,    # Tarayıcı çerezleri/kimlik doğrulama için gerekli olabilir
     allow_methods=["*"],
     allow_headers=["*"],
 )
