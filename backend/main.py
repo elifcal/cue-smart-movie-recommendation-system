@@ -409,15 +409,11 @@ def _dynamic_db_limit(filters: Dict[str, Any]) -> int:
 
 def _apply_db_filters(query, filters: Dict[str, Any]):
     """
-    Güvenli şekilde DB seviyesinde uygulanabilecek filtreler:
-    - adult
+    DB seviyesinde güvenli uygulanabilecek filtreler:
     - original_language
-    - vote_count min
     - release_date alt/üst
-    Geri kalanı content_filter’da kalır.
+    - runtime alt/üst
     """
-    query = query.eq("adult", False)
-
     original_language = filters.get("original_language")
     if original_language:
         query = query.eq("original_language", str(original_language).lower())
@@ -430,7 +426,6 @@ def _apply_db_filters(query, filters: Dict[str, Any]):
     if max_year is not None:
         query = query.lte("release_date", f"{int(max_year)}-12-31")
 
-    # runtime filtresi şemada numeric ise güvenli
     min_runtime = filters.get("min_runtime")
     if min_runtime is not None:
         query = query.gte("runtime", int(min_runtime))
@@ -438,9 +433,6 @@ def _apply_db_filters(query, filters: Dict[str, Any]):
     max_runtime = filters.get("max_runtime")
     if max_runtime is not None:
         query = query.lte("runtime", int(max_runtime))
-
-    # country filtre DB’de güvenli değilse content_filter’a bırakılabilir.
-    # Eğer production_countries ayrı bir text/json kolon ise burada daha ileri geliştirilebilir.
 
     return query
 
@@ -460,10 +452,10 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
 
     try:
         base_query = sb.table("movies").select(
-            "tmdb_id, title, english_title, original_title, overview, "
-            "genre_ids, genres, keywords, production_countries, spoken_languages, credits, "
-            "imdb_id, vote_average, vote_count, popularity, poster_path, videos, "
-            "release_date, runtime, original_language, tagline, adult, release_dates"
+            "tmdb_id, imdb_id, title, english_title, original_title, overview, tagline, "
+            "genres, genre_ids, keywords, vote_average, vote_count, popularity, "
+            "poster_path, videos, release_date, runtime, original_language, "
+            "credits, production_countries"
         )
 
         base_query = _apply_db_filters(base_query, filters)
@@ -529,7 +521,6 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                 "genres": row.get("genres") or [],
                 "keywords": row.get("keywords") or [],
                 "production_countries": row.get("production_countries") or [],
-                "spoken_languages": row.get("spoken_languages") or [],
                 "credits": row.get("credits") or {},
                 "imdb_id": row.get("imdb_id"),
                 "vote_average": row.get("vote_average", 0.0),
@@ -541,8 +532,6 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any]) -> List[Dict[str, A
                 "runtime": row.get("runtime"),
                 "original_language": row.get("original_language", ""),
                 "tagline": row.get("tagline", ""),
-                "adult": bool(row.get("adult", False)),
-                "release_dates": row.get("release_dates"),
                 "emotion_curve": _parse_dna_field(dna_data.get("emotion_curve")),
                 "color_palette": _parse_dna_field(dna_data.get("color_palette")),
             })
@@ -785,7 +774,6 @@ async def search(
             parsed_filters=parsed_filters,
             content_language=content_language,
             top_n=CONTENT_TOP_N,
-            include_adult=False,
             include_credits=False,
         )
         logger.info("Content filter: %d sonuç | sorgu: '%s'", len(content_results), enriched_query)

@@ -334,26 +334,6 @@ def _extract_country_codes(countries: Any) -> List[str]:
     return codes
 
 
-def parse_spoken_languages(languages: Any) -> str:
-    if not isinstance(languages, list):
-        return ""
-
-    values: List[str] = []
-    for item in languages:
-        if isinstance(item, dict):
-            name = clean_text_lower(item.get("english_name", ""))
-            iso = clean_text_lower(item.get("iso_639_1", ""))
-            if name:
-                values.append(name)
-            if iso:
-                values.append(iso)
-        else:
-            text = clean_text_lower(item)
-            if text:
-                values.append(text)
-    return " ".join(values)
-
-
 def parse_credits(credits: Any, include_credits: bool = False) -> str:
     if not include_credits or credits is None:
         return ""
@@ -412,7 +392,6 @@ def prepare_df(
         "genre_ids": None,
         "keywords": None,
         "production_countries": None,
-        "spoken_languages": None,
         "credits": None,
         "vote_average": 0.0,
         "vote_count": 0,
@@ -420,11 +399,9 @@ def prepare_df(
         "release_date": "",
         "runtime": None,
         "original_language": "",
-        "adult": False,
         "poster_path": None,
         "videos": None,
         "imdb_id": None,
-        "release_dates": None,
         "emotion_curve": None,
         "color_palette": None,
     }
@@ -452,7 +429,6 @@ def prepare_df(
 
     df["keywords_str"] = df["keywords"].apply(parse_keywords)
     df["countries_str"] = df["production_countries"].apply(parse_production_countries)
-    df["spoken_languages_str"] = df["spoken_languages"].apply(parse_spoken_languages)
     df["credits_str"] = df["credits"].apply(
         lambda c: parse_credits(c, include_credits=include_credits)
     )
@@ -467,7 +443,6 @@ def prepare_df(
         (df["overview_clean"] + " ") * 1 +
         (df["tagline_clean"] + " ") * 1 +
         (df["countries_str"] + " ") * 1 +
-        (df["spoken_languages_str"] + " ") * 1 +
         (df["credits_str"] + " ") * 1
     ).str.strip()
 
@@ -575,15 +550,11 @@ def build_enriched_query(
 def apply_hard_filters(
     df: pd.DataFrame,
     filters: Optional[Dict[str, Any]],
-    include_adult: bool = False,
 ) -> pd.DataFrame:
     if df.empty:
         return df
 
     df = df.copy()
-
-    if not include_adult and "adult" in df.columns:
-        df = df[~df["adult"].astype(bool)]
 
     if "vote_count" in df.columns:
         min_votes = _dynamic_min_vote_count(len(df))
@@ -701,16 +672,13 @@ def rank_movies(
             "release_date": row.get("release_date", ""),
             "runtime": row.get("runtime"),
             "original_language": row.get("original_language", ""),
-            "adult": bool(row.get("adult", False)),
             "poster_path": row.get("poster_path"),
             "videos": row.get("videos"),
             "imdb_id": row.get("imdb_id"),
             "genre_ids": row.get("genre_ids"),
             "keywords": row.get("keywords"),
             "production_countries": row.get("production_countries"),
-            "spoken_languages": row.get("spoken_languages"),
             "credits": row.get("credits"),
-            "release_dates": row.get("release_dates"),
             "emotion_curve": row.get("emotion_curve"),
             "color_palette": row.get("color_palette"),
         })
@@ -731,7 +699,6 @@ def get_recommendations_from_list(
     parsed_filters: Optional[Dict[str, Any]] = None,
     content_language: str = "tr",
     top_n: int = 20,
-    include_adult: bool = False,
     include_credits: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     filters = normalize_filters(parsed_filters)
@@ -757,7 +724,6 @@ def get_recommendations_from_list(
     df_filtered = apply_hard_filters(
         df=df,
         filters=filters,
-        include_adult=include_adult,
     )
     if df_filtered.empty:
         logger.warning("Hard filtreler sonrası hiçbir film kalmadı. Filtreler: %s", filters)
