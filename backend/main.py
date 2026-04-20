@@ -19,6 +19,8 @@ from nlp.ai_parser import parse_query_with_ai
 from ml.content_filter import get_recommendations_from_list
 from ml.collaborative_lite import collab_score_by_tmdb_ids, load_lite_model
 from ml.ranker import HybridRanker
+from ml.explainer import generate_batch_why_texts
+import json
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -178,23 +180,42 @@ def format_runtime(runtime: Any) -> Optional[str]:
 def fetch_movies_from_source(parsed_filters: Dict[str, Any], limit: int = 300) -> List[Dict[str, Any]]:
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
-    if not url or not key:
-        logger.warning("SUPABASE_URL veya SUPABASE_KEY eksik.")
-        return []
+    if not url or not key: return []
     try:
         sb = create_client(url, key)
+        # 1. Movies tablosundan çek
         rows = getattr(sb.table("movies").select("*").limit(limit).execute(), "data", None) or []
+        if not rows: return []
+
+        # 2. ID listesini hazırla
+        tmdb_ids = [int(row["tmdb_id"]) for row in rows if row.get("tmdb_id") is not None]
+        
+        dna_dict = {}
+        if tmdb_ids:
+            # 3. film_dna tablosundan tmdb_id sütununu seçerek çek
+            # NOT: Tablonda sütun adının tmdb_id olduğundan eminiz
+            dna_res = sb.table("film_dna").select("tmdb_id, emotion_curve, color_palette").in_("tmdb_id", tmdb_ids).execute()
+            dna_rows = getattr(dna_res, "data", []) or []
+            
+            for dna in dna_rows:
+                tid = dna.get("tmdb_id")
+                if tid is not None:
+                    dna_dict[int(tid)] = dna
+
         movies = []
         for row in rows:
+            m_id = int(row["tmdb_id"]) if row.get("tmdb_id") is not None else None
+            # EŞLEŞTİRME SORGUSU
+            dna_data = dna_dict.get(m_id, {}) if m_id in dna_dict else {}
+
             movies.append({
-                "id":                   row.get("tmdb_id"),
+                "id":                   m_id,
                 "title":                row.get("title", ""),
                 "english_title":        row.get("english_title", ""),
                 "original_title":       row.get("original_title", ""),
                 "overview":             row.get("overview", ""),
                 "genre_ids":            row.get("genre_ids") or [],
                 "genres":               row.get("genres") or [],
-                "keywords":             row.get("keywords") or [],
                 "imdb_id":              row.get("imdb_id"),
                 "vote_average":         row.get("vote_average", 0.0),
                 "vote_count":           row.get("vote_count", 0),
@@ -204,20 +225,36 @@ def fetch_movies_from_source(parsed_filters: Dict[str, Any], limit: int = 300) -
                 "release_date":         row.get("release_date", ""),
                 "runtime":              row.get("runtime"),
                 "original_language":    row.get("original_language", ""),
-                "adult":                False,
-                "production_countries": row.get("production_countries") or [],
-                "spoken_languages":     row.get("spoken_languages") or [],
-                "release_dates":        row.get("release_dates"),
-                "credits":              row.get("credits"),
                 "tagline":              row.get("tagline", ""),
                 "budget":               row.get("budget"),
                 "revenue":              row.get("revenue"),
+                "emotion_curve":        dna_data.get("emotion_curve"),
+                "color_palette":        dna_data.get("color_palette"),
             })
-        logger.info("Supabase'den %d film çekildi.", len(movies))
         return movies
     except Exception as exc:
-        logger.exception("Supabase film çekme hatası: %s", exc)
+        logger.exception("Supabase hatası: %s", exc)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Kullanıcın etkileşime girdiği filmler
+# ---------------------------------------------------------------------------
+
+def get_user_watched_movie_ids(user_id: int) -> set:
+    """Kullanıcının etkileşime girdiği (izlediği, beğendiği vs.) filmlerin ID'lerini getirir."""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    if not url or not key:
+        return set()
+    try:
+        sb = create_client(url, key)
+        # user_prefs tablosunda bu kullanıcıya ait kayıtları çek
+        rows = getattr(sb.table("user_prefs").select("movie_id").eq("user_id", user_id).execute(), "data", [])
+        return set(row["movie_id"] for row in rows if row.get("movie_id") is not None)
+    except Exception as exc:
+        logger.warning("İzlenen filmler çekilemedi: %s", exc)
+        return set()
 
 
 # ---------------------------------------------------------------------------
@@ -265,26 +302,22 @@ def apply_hybrid_scores(user_id: int, content_results: List[Dict[str, Any]]) -> 
 # Kullanıcıya Türkçe sunum
 # ---------------------------------------------------------------------------
 
-def enrich_for_display(film: Dict[str, Any], parsed_filters: Dict[str, Any]) -> Dict[str, Any]:
-    film_id      = film.get("movie_id") or film.get("id")
-    original_lang= film.get("original_language", "")
+def enrich_for_display(film: Dict[str, Any], parsed_filters: Dict[str, Any], why_text: str) -> Dict[str, Any]:
+    film_id       = film.get("movie_id") or film.get("id")
+    original_lang = film.get("original_language", "")
     original_title = film.get("original_title") or film.get("title", "")
     turkish_title  = get_turkish_title(film)
-
-    overview_raw = film.get("overview", "")
-    overview_tr  = overview_raw if original_lang == "tr" else translate_to_turkish(overview_raw)
-
-    tagline_raw = film.get("tagline", "")
-    tagline_tr  = (tagline_raw if original_lang == "tr" else translate_to_turkish(tagline_raw)) if tagline_raw else ""
-
-    genre_ids = film.get("genre_ids") or []
-    genres_tr = get_genre_names_tr(genre_ids)
-
-    youtube_url = extract_youtube_url(film.get("videos"))
-    imdb_id     = film.get("imdb_id")
-    imdb_url    = f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else None
-    imdb_score  = round(float(film.get("tmdb_score") or 0.0), 1)
-    runtime_fmt = format_runtime(film.get("runtime"))
+    overview_raw  = film.get("overview", "")
+    overview_tr   = overview_raw if original_lang == "tr" else translate_to_turkish(overview_raw)
+    tagline_raw   = film.get("tagline", "")
+    tagline_tr    = (tagline_raw if original_lang == "tr" else translate_to_turkish(tagline_raw)) if tagline_raw else ""
+    genre_ids     = film.get("genre_ids") or []
+    genres_tr     = get_genre_names_tr(genre_ids)
+    youtube_url   = extract_youtube_url(film.get("videos"))
+    imdb_id       = film.get("imdb_id")
+    imdb_url      = f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else None
+    imdb_score    = round(float(film.get("tmdb_score") or 0.0), 1)
+    runtime_fmt   = format_runtime(film.get("runtime"))
 
     release_year = None
     rd = film.get("release_date", "")
@@ -294,19 +327,37 @@ def enrich_for_display(film: Dict[str, Any], parsed_filters: Dict[str, Any]) -> 
         except ValueError:
             pass
 
-    why = []
-    if parsed_filters.get("genre_ids"):
-        why.append("istenen türlerle uyumlu")
-    if parsed_filters.get("mood"):
-        why.append(f"{parsed_filters['mood']} tona yakın")
-    if parsed_filters.get("theme"):
-        why.append("tema eşleşmesi güçlü")
-    if film.get("svd_score_raw") is not None:
-        why.append(f"kullanıcı zevk skoru {film['svd_score_raw']}")
-    if imdb_score >= 7.0:
-        why.append(f"yüksek puanlı ({imdb_score})")
-    why_text = ", ".join(why) if why else "sorguyla içerik olarak eşleşti"
+    # 2. Görsel Verileri (Curve & Palette) Parse Et
+    raw_curve = film.get("emotion_curve")
+    raw_palette = film.get("color_palette")
 
+    safe_emotion_curve = []
+    try:
+        if isinstance(raw_curve, str):
+            raw_curve = json.loads(raw_curve)
+        if isinstance(raw_curve, list):
+            safe_emotion_curve = [float(v) for v in raw_curve]
+        else:
+            safe_emotion_curve = [0.0] * 10
+    except Exception:
+        safe_emotion_curve = [0.0] * 10
+
+    safe_color_palette = []
+    try:
+        if isinstance(raw_palette, str):
+            raw_palette = json.loads(raw_palette)
+        if isinstance(raw_palette, list):
+            for item in raw_palette:
+                if isinstance(item, list) and len(item) == 3:
+                    safe_color_palette.append(f"rgb({item[0]},{item[1]},{item[2]})")
+                else:
+                    safe_color_palette.append(str(item))
+        else:
+            safe_color_palette = ["#2D3748", "#4A5568", "#718096"]
+    except Exception:
+        safe_color_palette = ["#2D3748", "#4A5568", "#718096"]
+
+    # 3. Sonucu Dön
     return {
         "movie_id":            film_id,
         "imdb_id":             imdb_id,
@@ -333,8 +384,8 @@ def enrich_for_display(film: Dict[str, Any], parsed_filters: Dict[str, Any]) -> 
         "dna_score":           film.get("dna_score"),
         "score_mode":          film.get("score_mode"),
         "why_text":            why_text,
-        "emotion_curve":       [0.02, 0.04, 0.06, 0.09, 0.13, 0.18, 0.21, 0.19, 0.14, 0.08],
-        "color_palette":       ["#1a1a2e", "#16213e", "#0f3460"],
+        "emotion_curve":       safe_emotion_curve,
+        "color_palette":       safe_color_palette,
     }
 
 
@@ -350,6 +401,9 @@ async def health():
         "svd_loaded": _lite_model is not None,
     }
 
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
 
 @app.get("/search")
 async def search(
@@ -357,10 +411,22 @@ async def search(
     user_id: int = Query(1,   description="Kişiselleştirme için kullanıcı ID"),
 ):
     try:
+        # 1. Kullanıcı isteğini anlama ve filmleri çekme
         parsed_filters   = parse_query_with_ai(q)
         content_language = decide_content_language(parsed_filters)
         candidate_movies = fetch_movies_from_source(parsed_filters, limit=300)
 
+        # 2. İzlenen Filmleri Filtreleme (Cold-start ve AI maliyetini koruma)
+        watched_ids = get_user_watched_movie_ids(user_id)
+        if watched_ids:
+            candidate_movies = [m for m in candidate_movies if m["id"] not in watched_ids]
+            logger.info("Kullanıcı %d için %d izlenmiş film filtrelendi.", user_id, len(watched_ids))
+
+        # Eğer filtreleme sonrası elde hiç film kalmadıysa sistemi yorma
+        if not candidate_movies:
+            return {"status": "ok", "message": "Kriterlere uygun yeni film bulunamadı.", "results": []}
+
+        # 3. İçerik tabanlı öneri filtresi
         enriched_query, content_results = get_recommendations_from_list(
             raw_query=q,
             movies_list=candidate_movies,
@@ -371,9 +437,22 @@ async def search(
         )
         logger.info("Content filter: %d sonuç | sorgu: '%s'", len(content_results), enriched_query)
 
+        # 4. SVD Hybrid Skorlama
         final_results  = apply_hybrid_scores(user_id, content_results)
-        display_results = [enrich_for_display(f, parsed_filters) for f in final_results]
+        
+        # 5. Groq API ile Toplu AI 'Neden' Metni Üretimi
+        # API'yi çok yormamak için sadece ilk 15 filme özel metin yazdırıyoruz
+        top_movies = final_results[:15]
+        ai_reasons = generate_batch_why_texts(top_movies, parsed_filters) or []
 
+        # 6. Frontend için verileri paketleme
+        display_results = []
+        for i, film in enumerate(final_results):
+            # Groq'tan gelen listede karşılığı varsa al, yoksa default bir metin koy
+            reason = ai_reasons[i] if i < len(ai_reasons) else "Senin için özenle seçildi."
+            display_results.append(enrich_for_display(film, parsed_filters, reason))
+
+        # 7. Yanıtı dönme
         return make_json_safe({
             "query":            q,
             "user_id":          user_id,
@@ -389,7 +468,43 @@ async def search(
         logger.exception("Search endpoint hatası: %s", exc)
         return {"status": "error", "message": str(exc), "query": q, "results": []}
 
+# ---------------------------------------------------------------------------
+# feedback
+# ---------------------------------------------------------------------------
 
 @app.post("/feedback")
-async def feedback(film_id: int, action: str):
-    return {"status": "ok", "film_id": film_id, "action": action}
+async def feedback(
+    user_id: int = Query(..., description="Aksiyonu yapan kullanıcının ID'si"),
+    film_id: int = Query(..., description="Oylanan filmin TMDB/Sistem ID'si"), 
+    action: str = Query(..., description="'like', 'dislike' veya 'watched'")
+):
+    try:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            return {"status": "error", "message": "Veritabanı bağlantı bilgileri eksik."}
+
+        sb = create_client(url, key)
+        
+        # Aksiyon türüne göre preference (beğeni) skorunu belirle
+        if action.lower() == "like":
+            pref_value = 1
+        elif action.lower() == "dislike":
+            pref_value = -1
+        else:
+            # 'watched' aksiyonu nötr olarak (0) kaydedilir
+            pref_value = 0 
+
+        data = {
+            "user_id": user_id,
+            "movie_id": film_id,
+            "preference": pref_value
+        }
+
+        sb.table("user_prefs").upsert(data).execute()
+
+        return {"status": "ok", "film_id": film_id, "action": action, "message": "Kullanıcı aksiyonu kaydedildi"}
+        
+    except Exception as exc:
+        logger.error("Feedback kaydetme hatası: %s", exc)
+        return {"status": "error", "message": str(exc)}

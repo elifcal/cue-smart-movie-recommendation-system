@@ -40,7 +40,7 @@ class HybridRanker:
 
     Beklenen aday formatı:
     {
-        "movie_id":            int,
+        "tmdb_id":            int,
         "content_score":       float,  # [0, 1]
         "collaborative_score": float,  # [0, 1]
         "tmdb_score":          float,  # [0, 10] — burada normalize edilir
@@ -80,20 +80,20 @@ class HybridRanker:
     def normalize_tmdb_score(self, v: Any) -> float:
         return self._clamp(self._safe_float(v) / 10.0)
 
-    def get_dna_score(self, movie_id: Any) -> Optional[float]:
+    def get_dna_score(self, tmdb_id: Any) -> Optional[float]:
         """
         film_dna tablosundan skor çeker.
         Tablo henüz hazır değilse (kolon yok / tablo yok) → None döner,
         DNA devre dışı bırakılır ve sonraki isteklerde tekrar denenmez.
         """
-        if self.supabase is None or movie_id is None or self._dna_disabled:
+        if self.supabase is None or tmdb_id is None or self._dna_disabled:
             return None
         try:
             resp = (
                 self.supabase
                 .table("film_dna")
                 .select("*")           # önce tüm kolonları çek, hangisi var bilmiyoruz
-                .eq("movie_id", int(movie_id))
+                .eq("tmdb_id", int(tmdb_id))
                 .limit(1)
                 .execute()
             )
@@ -113,7 +113,7 @@ class HybridRanker:
                 logger.warning("film_dna tablosu/kolonu hazır değil, DNA devre dışı: %s", exc)
                 self._dna_disabled = True
             else:
-                logger.warning("DNA skor alımı başarısız, movie_id=%s: %s", movie_id, exc)
+                logger.warning("DNA skor alımı başarısız, tmdb_id=%s: %s", tmdb_id, exc)
             return None
 
     def compute_hybrid_score(
@@ -134,8 +134,8 @@ class HybridRanker:
         return round(content * 0.45 + collab * 0.40 + tmdb * 0.15, 6)
 
     def enrich_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        movie_id  = candidate.get("movie_id") or candidate.get("id")
-        dna_score = self.get_dna_score(movie_id)
+        tmdb_id  = candidate.get("tmdb_id") or candidate.get("id")
+        dna_score = self.get_dna_score(tmdb_id)
         hybrid    = self.compute_hybrid_score(
             content_score       = candidate.get("content_score", 0.0),
             collaborative_score = candidate.get("collaborative_score", 0.0),
@@ -189,7 +189,7 @@ def build_pipeline_candidates(
     return [
         {
             **r,
-            "movie_id":            int(r["id"]) if r.get("id") is not None else None,
+            "tmdb_id":            int(r["id"]) if r.get("id") is not None else None,
             "content_score":       float(r.get("content_score") or 0.0),
             "collaborative_score": collab_scores.get(int(r["id"]) if r.get("id") else 0, default_c),
             "tmdb_score":          float(r.get("tmdb_score") or 0.0),
