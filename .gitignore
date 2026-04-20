@@ -15,3 +15,6 @@ frontend/.env
 .env
 frontend/.env
 backend/.env
+cookies.txt
+*.xlsx
+**/*.xlsx
