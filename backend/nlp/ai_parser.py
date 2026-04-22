@@ -1,34 +1,21 @@
 """
-ai_parser.py — CUE Query Parser v0.7.0
----------------------------------------
+ai_parser.py — CUE Query Parser v1.0.2
+
 İki ayrı prompt stratejisi:
-  1. FILTER PROMPT  → genre, mood, theme, language, violence, year, runtime
-  2. DNA PROMPT     → 16 boyutlu duygu/his vektörü
+  1. FILTER PROMPT  → genre, mood, theme, language, violence, year, runtime, reference title
+  2. DNA PROMPT     → 16 boyutlu query signal vektörü
 
 Model: llama-3.1-8b-instant
-  Ücretsiz limit: 14.400 req/gün, 30 req/dak, 500.000 token/gün
-  İki çağrı = ~700-800 token/sorgu → günlük limit içinde çok rahat kalır.
-  Explainer ayrıca 70B kullanır; parser'ı 8B'de tutmak limit dengesini korur.
 
-v0.7.0 değişiklikleri:
-  - Filtreler ve DNA vektörü iki bağımsız prompt ile üretilir
-    (birbirini karıştırmaz, hata izolasyonu sağlar)
-  - Tüm prompt eksikleri giderildi:
-    * mood → tek değer, baskın olanı seç kuralı
-    * violence → pozitif kural netleştirildi (high_violence için açık tetikleyiciler)
-    * genre + theme birlikte set et kuralı
-    * country + original_language ayrımı
-    * rating_pref netleştirildi (kalite ≠ popularite)
-    * vote_count_preference yalnızca "low" ve açık indie talebi için
-    * çelişkili sorgu yönetimi (pozitif intent koru, sadece açık negasyonları exclude'a yaz)
-    * "never omit any field" zorunluluğu
-  - DNA promptu basit, net, kısa (8B için optimize)
-  - low_violence + high_violence aynı anda true → low kazanır
-  - include/exclude genre çakışması → exclude kazanır
-  - mood / excluded_moods çakışması → mood kaldırılır
+v1.0.2 düzeltmeleri:
+- reference_titles regex'i küçük harfli başlıkları da daha iyi yakalar
+- psychological guardrail tek blokta birleştirildi
+- LLM filter prompt başarısız olsa bile regex fallback daha anlamlı çalışır
+- raw_filters dict değilse güvenli fallback uygulanır
 """
 
 import os
+import re
 import json
 import logging
 from groq import Groq
@@ -53,14 +40,12 @@ def _get_client() -> Groq:
 # ---------------------------------------------------------------------------
 
 DNA_VECTOR_DIM = 16
-# Sıra: action_intensity, emotional_depth, humor_level, fear_level,
-#        romance_level, sci_fi_level, mystery_level, drama_level,
-#        adventure_level, dark_tone, light_tone, epic_scale,
-#        psychological_depth, violence_level, music_importance, historical_weight
+
 DNA_GLOBAL_MEAN: List[float] = [
     0.05, 0.04, 0.06, 0.05, 0.07, 0.04, 0.05, 0.06,
     0.04, 0.05, 0.06, 0.05, 0.04, 0.06, 0.05, 0.04,
 ]
+
 
 # ---------------------------------------------------------------------------
 # PROMPT 1 — Filtreler
@@ -70,12 +55,11 @@ FILTER_SYSTEM_PROMPT = """You are a movie filter extractor. Read the user query 
 No markdown, no explanation, no extra text. Start directly with { and end with }.
 
 IMPORTANT OUTPUT RULES:
-
 * Return exactly one JSON object
 * Never omit any field
 * Never add extra fields
 * If information is missing, use null, false, or [] as defined
-* Be conservative: do NOT hallucinate fields not clearly supported by the query
+* Be conservative: do NOT hallucinate unsupported fields
 
 SCHEMA — return ALL fields:
 {
@@ -92,7 +76,8 @@ SCHEMA — return ALL fields:
 "rating_pref": null,
 "original_language": null,
 "country": null,
-"vote_count_preference": null
+"vote_count_preference": null,
+"reference_titles": []
 }
 
 GENRE IDS — use ONLY these numbers:
@@ -102,32 +87,26 @@ Mystery=9648, Romance=10749, Sci-Fi=878, Thriller=53, War=10752, Western=37
 
 GENRE MAPPING:
 "aksiyon"/"action" → 28
-"komedi"/"güldüren"/"eğlenceli" → 35
-"dram"/"duygusal hikaye" → 18
+"komedi"/"güldüren" → 35
+"dram"/"drama"/"duygusal hikaye" → 18
 "korku"/"horror"/"korkutucu" → 27
 "gerilim"/"gerilimli"/"thriller"/"suspense" → 53
 "romantik"/"aşk filmi"/"love story" → 10749
-"bilim kurgu"/"sci-fi"/"uzay" → 878
-"gizem"/"gizemli"/"mystery"/"mysterious"/"dedektif" → 9648
+"bilim kurgu"/"sci-fi"/"science fiction" → 878
+"gizem"/"gizemli"/"mystery"/"dedektif" → 9648
 "macera"/"adventure" → 12
-"suç"/"crime"/"gangster"/"mafya" → 80
+"suç"/"crime"/"mafya"/"gangster" → 80
 "animasyon"/"çizgi film" → 16
 "belgesel" → 99
-"fantezi"/"fantasy"/"büyü"/"ejderha" → 14
-"tarih"/"historical"/"tarihi" → 36
+"fantastik"/"fantasy"/"büyü"/"ejderha" → 14
+"tarihi"/"historical" → 36
 "savaş"/"war" → 10752
 "western"/"kovboy" → 37
+"aile filmi" → 10751
 
 IMPORTANT PRIORITY RULE:
 If the user explicitly names a genre word, ALWAYS include it in genre_ids unless it is explicitly negated.
 Do NOT convert explicit genre words into only mood.
-
-Examples:
-"gerilimli" → genre_ids:[53]
-"gizemli" → genre_ids:[9648]
-"gerilimli ve gizemli" → genre_ids:[53,9648]
-"korku olmasın" → exclude_genre_ids:[27]
-"romantik istemiyorum" → exclude_genre_ids:[10749]
 
 GENRE + THEME:
 If both appear, include BOTH:
@@ -135,22 +114,18 @@ If both appear, include BOTH:
 "uzay bilim kurgu" → genre_ids:[878], theme:["space"]
 
 NEGATION RULES:
-Negation words: "not","no","without","avoid","değil","istemiyorum","olmasın","istemem"
-STRICT NEGATION EXAMPLES:
-"komedi istemiyorum" → exclude_genre_ids:[35]
-"komedi olmasın" → exclude_genre_ids:[35]
-"romantik olmasın" → exclude_genre_ids:[10749]
-"romantik istemiyorum" → exclude_genre_ids:[10749]
-"bilim kurgu olmasın" → exclude_genre_ids:[878]
+Negation words:
+"not","no","without","avoid","değil","istemiyorum","olmasın","istemem","hariç","yok"
 
-* Negated genre → exclude_genre_ids
-* Negated mood → excluded_moods
-* Negated violence → low_violence=true
+Negated genre → exclude_genre_ids
+Negated mood → excluded_moods
+Negated violence → low_violence=true
 
 Examples:
 "komedi olmayan dram" → genre_ids:[18], exclude_genre_ids:[35]
 "romantik istemiyorum" → exclude_genre_ids:[10749]
 "korku değil gerilim" → genre_ids:[53], exclude_genre_ids:[27]
+"bilim kurgu hariç her şey olur" → exclude_genre_ids:[878]
 
 VIOLENCE:
 POSITIVE → high_violence=true:
@@ -168,81 +143,90 @@ Options: emotional, dark, tense, sad, fun, romantic, light, mysterious, epic
 * Do NOT infer extra moods
 * Use excluded_moods ONLY if explicitly stated
 
-Example:
+Examples:
 "gerilimli ve karanlık" → mood:"tense"
+"çok karanlık olmasın" → excluded_moods:["dark"]
 
 THEME:
 Options: twist, space, zombie, serial_killer, time_travel, dystopian, psychological,
 supernatural, vampire, monster, robot, ai, revenge, survival, war, historical, biography
+
 IMPORTANT THEME RULES:
 "psikolojik" / "psychological" → theme:["psychological"]
 "psikolojik" is NOT a genre
 Do NOT convert "psychological" into Sci-Fi, Mystery, Horror, or any other genre unless those words are explicitly present.
-Do NOT invent extra themes.
-
-Examples:
-"sonu twistli" → theme:["twist"]
-"gerçek hikaye" → theme:["biography"]
 
 LANGUAGE:
 "English"/"ingilizce" → original_language="en"
-"Türkçe"/"yerli" → original_language="tr", country="TR"
-"Kore filmi" → original_language="ko", country="KR"
-"Japon filmi" → original_language="ja", country="JP"
-"Fransız filmi" → original_language="fr", country="FR"
-"Alman filmi" → original_language="de", country="DE"
+"Türkçe"/"yerli"/"Türk yapımı"/"Türk filmi" → original_language="tr", country="TR"
+"Kore filmi"/"Kore yapımı" → original_language="ko", country="KR"
+"Japon filmi"/"Japon yapımı" → original_language="ja", country="JP"
+"Fransız filmi"/"Fransız yapımı" → original_language="fr", country="FR"
+"Alman filmi"/"Alman yapımı" → original_language="de", country="DE"
+"İspanyol filmi"/"İspanyol yapımı" → original_language="es", country="ES"
+"İtalyan filmi"/"İtalyan yapımı" → original_language="it", country="IT"
 
 RATING:
 "yüksek puanlı","kaliteli","ödüllü" → rating_pref="high"
 "popüler","çok izlenen" → rating_pref="popular"
 
 RUNTIME:
-"kısa","çok uzun olmasın" → runtime_pref="short"
+"kısa","çok uzun olmasın","90 dakika altı" → runtime_pref="short"
 "uzun","epik süre" → runtime_pref="long"
 
 YEAR:
 "çok eski olmasın" → year_gte=2005
 "2015 sonrası" → year_gte=2015
 "90'lar" → year_gte=1990, year_lte=1999
+"2000 öncesi değil" → year_gte=2000
 
-SPECIAL:
-"aile filmi" → genre_ids includes 10751 and low_violence=true
+REFERENCE TITLES:
+If the user explicitly mentions one or more movie titles as examples, put them into reference_titles.
+Examples:
+"Inception gibi" → reference_titles:["Inception"]
+"Ayla tarzı bir film" → reference_titles:["Ayla"]
+"Interstellar ya da Arrival gibi" → reference_titles:["Interstellar","Arrival"]
 
 FINAL RULE:
-Return ONLY valid JSON with all fields filled."""
+Return ONLY valid JSON with all fields filled.
+"""
 
 
 # ---------------------------------------------------------------------------
 # PROMPT 2 — DNA Vektörü
 # ---------------------------------------------------------------------------
 
-DNA_SYSTEM_PROMPT = """You are a movie emotional profile encoder. Analyze the query and return ONLY raw JSON with exactly one field: "dna_query_vector" containing exactly 16 floats.
+DNA_SYSTEM_PROMPT = """You are a movie query signal encoder. Analyze the user query and return ONLY raw JSON with exactly one field: "dna_query_vector" containing exactly 16 floats.
 
 Vector dimension order (exactly this order):
-0:action_intensity  1:emotional_depth  2:humor_level  3:fear_level
-4:romance_level  5:sci_fi_level  6:mystery_level  7:drama_level
-8:adventure_level  9:dark_tone  10:light_tone  11:epic_scale
-12:psychological_depth  13:violence_level  14:music_importance  15:historical_weight
+0:emotion_curve_1
+1:emotion_curve_2
+2:emotion_curve_3
+3:emotion_curve_4
+4:emotion_curve_5
+5:emotion_curve_6
+6:emotion_curve_7
+7:emotion_curve_8
+8:emotion_curve_9
+9:emotion_curve_10
+10:tempo
+11:energy
+12:speech_ratio
+13:brightness
+14:saturation
+15:warmth
 
 Rules:
 - Values between 0.01 and 0.09
-- High relevance: 0.07-0.09
-- Moderate: 0.04-0.06
-- Low/irrelevant: 0.01-0.03
-- Never output all same values — reflect the actual query emotion
-- Return ONLY: {"dna_query_vector": [v0,v1,v2,...,v15]}
-
-Examples:
-"zombie horror" → [0.04,0.03,0.01,0.09,0.01,0.02,0.05,0.04,0.03,0.09,0.01,0.03,0.04,0.08,0.02,0.02]
-"romantic comedy" → [0.02,0.07,0.09,0.01,0.09,0.01,0.03,0.05,0.04,0.01,0.09,0.02,0.03,0.01,0.05,0.02]
-"psikolojik gerilim" → [0.03,0.06,0.01,0.07,0.02,0.03,0.08,0.08,0.02,0.08,0.01,0.03,0.09,0.05,0.02,0.02]
-"epik tarihi savaş" → [0.08,0.06,0.02,0.04,0.02,0.02,0.03,0.07,0.07,0.06,0.02,0.09,0.03,0.07,0.04,0.09]
-"eğlenceli aile animasyonu" → [0.04,0.05,0.08,0.01,0.04,0.03,0.03,0.04,0.07,0.01,0.09,0.04,0.02,0.01,0.06,0.02]"""
-
-
-# ---------------------------------------------------------------------------
-# Geçerli değer setleri
-# ---------------------------------------------------------------------------
+- If the query suggests fast/high-energy intensity, raise tempo and energy
+- If the query suggests dialogue-heavy / conversational / character drama, raise speech_ratio moderately
+- If the query suggests dark/gloomy atmosphere, reduce brightness and warmth
+- If the query suggests colorful/light/fun tone, increase brightness and saturation
+- If the query is vague, use moderate values close to average
+- The first 10 emotion_curve values should reflect the overall emotional rhythm of the query, but remain smooth and plausible
+- Return ONLY:
+{"dna_query_vector":[v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15]}
+"""
 
 _VALID_GENRE_IDS = {
     28, 12, 16, 35, 80, 99, 18, 10751, 14, 36,
@@ -261,10 +245,52 @@ _VALID_RUNTIME = {"short", "long"}
 _VALID_RATING = {"high", "popular"}
 _VALID_VOTE_COUNT_PREF = {"low"}
 
+_NEGATION_GUARDRAILS = {
+    35: re.compile(r"komedi\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem|olsun\s*istemiyorum|tarz[ıi]\s*de[gğ]il)", re.I),
+    27: re.compile(r"korku\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem|tarz[ıi]\s*de[gğ]il)", re.I),
+    878: re.compile(r"(bilim\s*kurgu|sci[\-\s]*fi|science\s*fiction)\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+    10749: re.compile(r"romantik\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem|tarz[ıi]\s*de[gğ]il)", re.I),
+    10751: re.compile(r"aile\s*(filmi\s*)?(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+    18: re.compile(r"dram\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+}
 
-# ---------------------------------------------------------------------------
-# Sanitize yardımcıları
-# ---------------------------------------------------------------------------
+_EXCLUDED_MOOD_GUARDRAILS = {
+    "dark": re.compile(r"(çok\s*)?karanlık\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+    "sad": re.compile(r"(çok\s*)?(hüzünlü|üzücü|ağlatan)\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+    "romantic": re.compile(r"romantik\s*(olmas[ıi]n|istemiyorum|de[gğ]il|hariç|yok|istemem)", re.I),
+}
+
+_POSITIVE_GENRE_HINTS = {
+    53: re.compile(r"\b(gerilim|gerilimli|thriller|suspense)\b", re.I),
+    9648: re.compile(r"\b(gizem|gizemli|mystery|dedektif)\b", re.I),
+    28: re.compile(r"\b(aksiyon|action)\b", re.I),
+    35: re.compile(r"\b(komedi)\b", re.I),
+    18: re.compile(r"\b(dram|drama)\b", re.I),
+    27: re.compile(r"\b(korku|horror)\b", re.I),
+    878: re.compile(r"\b(bilim\s*kurgu|sci[\-\s]*fi|science\s*fiction)\b", re.I),
+    10749: re.compile(r"\b(romantik|aşk\s*filmi)\b", re.I),
+    10751: re.compile(r"\b(aile\s*filmi|aile)\b", re.I),
+    12: re.compile(r"\b(macera|adventure)\b", re.I),
+    80: re.compile(r"\b(suç|crime|mafya|gangster)\b", re.I),
+    16: re.compile(r"\b(animasyon|çizgi\s*film)\b", re.I),
+    99: re.compile(r"\b(belgesel)\b", re.I),
+    14: re.compile(r"\b(fantastik|fantasy)\b", re.I),
+    36: re.compile(r"\b(tarihi|tarih|historical)\b", re.I),
+    10752: re.compile(r"\b(savaş|war)\b", re.I),
+    37: re.compile(r"\b(western|kovboy)\b", re.I),
+}
+
+_LANGUAGE_GUARDRAILS = [
+    (re.compile(r"\b(yerli|türkçe|turkce|türk\s*yap[ıi]m[ıi]|türk\s*filmi)\b", re.I), ("tr", "TR")),
+    (re.compile(r"\b(ingilizce|english|amerikan\s*yap[ıi]m[ıi]|amerikan\s*filmi)\b", re.I), ("en", "US")),
+    (re.compile(r"\b(kore\s*(filmi|yap[ıi]m[ıi])?|korean)\b", re.I), ("ko", "KR")),
+    (re.compile(r"\b(japon\s*(filmi|yap[ıi]m[ıi])?|japanese)\b", re.I), ("ja", "JP")),
+    (re.compile(r"\b(frans[ıi]z\s*(filmi|yap[ıi]m[ıi])?|french)\b", re.I), ("fr", "FR")),
+    (re.compile(r"\b(alman\s*(filmi|yap[ıi]m[ıi])?|german)\b", re.I), ("de", "DE")),
+    (re.compile(r"\b(ispanyol\s*(filmi|yap[ıi]m[ıi])?|spanish)\b", re.I), ("es", "ES")),
+    (re.compile(r"\b(italyan\s*(filmi|yap[ıi]m[ıi])?|italian)\b", re.I), ("it", "IT")),
+]
+
 
 def _safe_genre_ids(raw: Any) -> List[int]:
     if not raw:
@@ -273,10 +299,8 @@ def _safe_genre_ids(raw: Any) -> List[int]:
     for x in raw:
         try:
             val = int(x)
-            if val in _VALID_GENRE_IDS:
+            if val in _VALID_GENRE_IDS and val not in result:
                 result.append(val)
-            else:
-                logger.warning("Geçersiz genre_id atlandı: %s", val)
         except (TypeError, ValueError):
             logger.warning("Genre ID dönüştürülemedi: %s", x)
     return result
@@ -293,23 +317,53 @@ def _sanitize_themes(raw: Any) -> List[str]:
         return []
     if isinstance(raw, str):
         raw = [raw]
-    return [
-        t.strip().lower() for t in raw
-        if isinstance(t, str) and t.strip().lower() in _VALID_THEMES
-    ]
+
+    result = []
+    for t in raw:
+        if isinstance(t, str):
+            val = t.strip().lower()
+            if val in _VALID_THEMES and val not in result:
+                result.append(val)
+    return result
 
 
 def _sanitize_excluded_moods(raw: Any) -> List[str]:
     if not raw:
         return []
-    return [
-        m.strip().lower() for m in raw
-        if isinstance(m, str) and m.strip().lower() in _VALID_MOODS
-    ]
+
+    result = []
+    for m in raw:
+        if isinstance(m, str):
+            val = m.strip().lower()
+            if val in _VALID_MOODS and val not in result:
+                result.append(val)
+    return result
+
+
+def _sanitize_reference_titles(raw: Any) -> List[str]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+
+    result: List[str] = []
+    seen_lower = set()
+
+    for item in raw:
+        if isinstance(item, str):
+            title = item.strip()
+            if len(title) < 2:
+                continue
+
+            key = title.casefold()
+            if key not in seen_lower:
+                seen_lower.add(key)
+                result.append(title)
+
+    return result[:5]
 
 
 def _validate_dna_vector(raw: Any) -> List[float]:
-    """16 boyutlu DNA vektörünü doğrular. Eksik boyutlar global ortalama ile doldurulur."""
     if not raw or not isinstance(raw, list):
         logger.info("DNA vektörü boş/geçersiz, global ortalama kullanılıyor.")
         return list(DNA_GLOBAL_MEAN)
@@ -322,9 +376,7 @@ def _validate_dna_vector(raw: Any) -> List[float]:
         except (TypeError, ValueError):
             fallback = DNA_GLOBAL_MEAN[i] if i < len(DNA_GLOBAL_MEAN) else 0.05
             cleaned.append(fallback)
-            logger.warning("DNA boyut %d geçersiz ('%s'), ortalama kullanıldı.", i, val)
 
-    # Boyut düzeltme
     if len(cleaned) < DNA_VECTOR_DIM:
         start = len(cleaned)
         cleaned.extend(DNA_GLOBAL_MEAN[start: start + (DNA_VECTOR_DIM - start)])
@@ -350,16 +402,12 @@ def _empty_filters() -> Dict[str, Any]:
         "original_language": None,
         "country": None,
         "vote_count_preference": None,
+        "reference_titles": [],
         "dna_query_vector": list(DNA_GLOBAL_MEAN),
     }
 
 
-# ---------------------------------------------------------------------------
-# API çağrıları
-# ---------------------------------------------------------------------------
-
 def _call_filter_prompt(user_query: str) -> Dict[str, Any]:
-    """PROMPT 1: Filtre çıkarımı (llama-3.1-8b-instant)."""
     raw = ""
     try:
         response = _get_client().chat.completions.create(
@@ -369,11 +417,12 @@ def _call_filter_prompt(user_query: str) -> Dict[str, Any]:
                 {"role": "user", "content": user_query},
             ],
             temperature=0.05,
-            max_tokens=400,
+            max_tokens=500,
             response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
     except json.JSONDecodeError as exc:
         logger.error("Filter prompt JSON hatası: %s | Ham: %.200s", exc, raw)
         return {}
@@ -383,7 +432,6 @@ def _call_filter_prompt(user_query: str) -> Dict[str, Any]:
 
 
 def _call_dna_prompt(user_query: str) -> List[float]:
-    """PROMPT 2: DNA vektörü üretimi (llama-3.1-8b-instant)."""
     raw = ""
     try:
         response = _get_client().chat.completions.create(
@@ -393,7 +441,7 @@ def _call_dna_prompt(user_query: str) -> List[float]:
                 {"role": "user", "content": user_query},
             ],
             temperature=0.2,
-            max_tokens=150,
+            max_tokens=160,
             response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content.strip()
@@ -402,7 +450,6 @@ def _call_dna_prompt(user_query: str) -> List[float]:
         if isinstance(data, dict):
             vec = data.get("dna_query_vector")
             if vec is None:
-                # İlk liste değerini dene
                 vec = next((v for v in data.values() if isinstance(v, list)), None)
         elif isinstance(data, list):
             vec = data
@@ -419,75 +466,192 @@ def _call_dna_prompt(user_query: str) -> List[float]:
         return list(DNA_GLOBAL_MEAN)
 
 
-# ---------------------------------------------------------------------------
-# Ana fonksiyon
-# ---------------------------------------------------------------------------
+def _extract_reference_titles(user_query: str) -> List[str]:
+    titles: List[str] = []
+
+    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', user_query)
+    for a, b in quoted:
+        title = (a or b).strip()
+        if title and title not in titles:
+            titles.append(title)
+
+    # Küçük harfli kullanım ("inception gibi") için başta büyük harf zorunluluğu kaldırıldı.
+    patterns = [
+        r"([\wÇĞİÖŞÜçğıöşü'’:\- ]{2,40})\s+gibi",
+        r"([\wÇĞİÖŞÜçğıöşü'’:\- ]{2,40})\s+tarz[ıi]",
+        r"([\wÇĞİÖŞÜçğıöşü'’:\- ]{2,40})\s+benzeri",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, user_query, flags=re.I):
+            title = match.strip(" -:,'\"")
+            if len(title) >= 2 and title not in titles:
+                titles.append(title)
+
+    return titles[:3]
+
+
+def _apply_regex_guardrails(user_query: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    q_lower = user_query.lower()
+
+    for genre_id, pattern in _NEGATION_GUARDRAILS.items():
+        if pattern.search(q_lower):
+            if genre_id not in result["exclude_genre_ids"]:
+                result["exclude_genre_ids"].append(genre_id)
+            result["genre_ids"] = [g for g in result["genre_ids"] if g != genre_id]
+
+    for mood_name, pattern in _EXCLUDED_MOOD_GUARDRAILS.items():
+        if pattern.search(q_lower):
+            if mood_name not in result["excluded_moods"]:
+                result["excluded_moods"].append(mood_name)
+            if result["mood"] == mood_name:
+                result["mood"] = None
+
+    for genre_id, pattern in _POSITIVE_GENRE_HINTS.items():
+        if pattern.search(q_lower):
+            if genre_id not in result["genre_ids"] and genre_id not in result["exclude_genre_ids"]:
+                result["genre_ids"].append(genre_id)
+
+    # psychological tek blokta ele alınıyor
+    if re.search(r"\b(psikolojik|psychological)\b", q_lower, re.I):
+        if "psychological" not in result["theme"]:
+            result["theme"].append("psychological")
+
+        if 878 in result["genre_ids"] and not re.search(
+            r"\b(bilim\s*kurgu|sci[\-\s]*fi|science\s*fiction|uzay)\b",
+            q_lower,
+            re.I,
+        ):
+            result["genre_ids"] = [g for g in result["genre_ids"] if g != 878]
+
+    if "romantic" in result["excluded_moods"]:
+        if 10749 not in result["exclude_genre_ids"]:
+            result["exclude_genre_ids"].append(10749)
+        result["excluded_moods"] = [m for m in result["excluded_moods"] if m != "romantic"]
+        result["genre_ids"] = [g for g in result["genre_ids"] if g != 10749]
+
+    for pattern, (lang, country) in _LANGUAGE_GUARDRAILS:
+        if pattern.search(q_lower):
+            result["original_language"] = lang
+            if country:
+                result["country"] = country
+            break
+
+    if re.search(r"\b(90\s*dakika\s*alt[ıi]|k[ıi]sa\s*tutulsun)\b", q_lower, re.I):
+        result["runtime_pref"] = "short"
+
+    if re.search(r"(2000\s*öncesi\s*de[gğ]il|çok\s*eski\s*olmas[ıi]n)", q_lower, re.I):
+        if result["year_gte"] is None or result["year_gte"] < 2000:
+            result["year_gte"] = 2000
+
+    extracted_titles = _extract_reference_titles(user_query)
+    for title in extracted_titles:
+        if title not in result["reference_titles"]:
+            result["reference_titles"].append(title)
+
+    return result
+
+
+def _final_cleanup(result: Dict[str, Any]) -> Dict[str, Any]:
+    # --------------------------------------------------
+    # 1. Genre include vs exclude çakışması çöz
+    # --------------------------------------------------
+    overlap = set(result["genre_ids"]) & set(result["exclude_genre_ids"])
+    if overlap:
+        result["genre_ids"] = [g for g in result["genre_ids"] if g not in overlap]
+
+    # --------------------------------------------------
+    # 2. Mood çakışması (include vs exclude)
+    # --------------------------------------------------
+    if result["mood"] and result["mood"] in result["excluded_moods"]:
+        result["mood"] = None
+
+    # --------------------------------------------------
+    # 3. Şiddet çakışması
+    # --------------------------------------------------
+    if result["low_violence"] and result["high_violence"]:
+        result["high_violence"] = False
+
+    # --------------------------------------------------
+    # 4. Basit dedup (order korunur)
+    # --------------------------------------------------
+    result["genre_ids"] = list(dict.fromkeys(result["genre_ids"]))
+    result["exclude_genre_ids"] = list(dict.fromkeys(result["exclude_genre_ids"]))
+    result["excluded_moods"] = list(dict.fromkeys(result["excluded_moods"]))
+
+    # theme sadece valid olanlar kalsın
+    result["theme"] = [
+        t for t in dict.fromkeys(result["theme"])
+        if t in _VALID_THEMES
+    ]
+
+    # --------------------------------------------------
+    # 5. CRITICAL FIX: reference_titles case-insensitive dedup
+    # --------------------------------------------------
+    deduped_refs: List[str] = []
+    seen_ref_keys = set()
+
+    for title in result.get("reference_titles", []):
+        if not isinstance(title, str):
+            continue
+
+        clean_title = title.strip()
+        if len(clean_title) < 2:
+            continue
+
+        key = clean_title.casefold()  # <-- önemli fark burada
+
+        if key not in seen_ref_keys:
+            seen_ref_keys.add(key)
+            deduped_refs.append(clean_title)
+
+    result["reference_titles"] = deduped_refs
+
+    return result
+
 
 def parse_query_with_ai(user_query: str) -> Dict[str, Any]:
-    """
-    Kullanıcı sorgusunu iki ayrı Groq çağrısıyla ayrıştırır.
-
-    Çağrı 1 (filtreler): genre, mood, theme, language, violence, year, runtime
-    Çağrı 2 (DNA):       16 boyutlu duygu/his profil vektörü
-
-    Her iki çağrı bağımsızdır — biri başarısız olsa diğeri çalışmaya devam eder.
-    """
     user_query = (user_query or "").strip()
+
     if not user_query:
         logger.warning("Boş sorgu geldi, varsayılan filtreler döndürülüyor.")
         return _empty_filters()
 
-    # --- Çağrı 1: Filtreler ---
     raw_filters = _call_filter_prompt(user_query)
+    if not isinstance(raw_filters, dict):
+        raw_filters = {}
 
     result = _empty_filters()
 
-    # Genre ID'ler
+    # LLM hiç düzgün dönmese bile regex fallback sonra devreye girecek
     result["genre_ids"] = _safe_genre_ids(raw_filters.get("genre_ids"))
     result["exclude_genre_ids"] = _safe_genre_ids(raw_filters.get("exclude_genre_ids"))
-
-    # include/exclude çakışması → exclude kazanır
-    overlap = set(result["genre_ids"]) & set(result["exclude_genre_ids"])
-    if overlap:
-        logger.warning("Genre ID çakışması, exclude kazanır: %s", overlap)
-        result["genre_ids"] = [g for g in result["genre_ids"] if g not in overlap]
-
-    # Tema
     result["theme"] = _sanitize_themes(raw_filters.get("theme"))
 
-    # Mood (tekil) + excluded_moods
     raw_mood = _sanitize_mood(raw_filters.get("mood"))
     raw_excluded = _sanitize_excluded_moods(raw_filters.get("excluded_moods"))
     if raw_mood and raw_mood in raw_excluded:
-        logger.warning("Mood '%s' excluded_moods ile çakışıyor → mood kaldırıldı.", raw_mood)
         raw_mood = None
     result["mood"] = raw_mood
     result["excluded_moods"] = raw_excluded
 
-    # Şiddet
     result["low_violence"] = bool(raw_filters.get("low_violence", False))
     result["high_violence"] = bool(raw_filters.get("high_violence", False))
     if result["low_violence"] and result["high_violence"]:
-        logger.warning("low_violence + high_violence aynı anda true → high_violence=False.")
         result["high_violence"] = False
 
-    # Runtime
     rp = raw_filters.get("runtime_pref")
     result["runtime_pref"] = rp if rp in _VALID_RUNTIME else None
 
-    # Rating
     rr = raw_filters.get("rating_pref")
     result["rating_pref"] = rr if rr in _VALID_RATING else None
 
-    # Dil
     lang = raw_filters.get("original_language")
     result["original_language"] = str(lang).lower().strip() if lang else None
 
-    # Ülke
     country = raw_filters.get("country")
     result["country"] = str(country).upper().strip() if country else None
 
-    # Yıl
     for year_field in ("year_gte", "year_lte"):
         val = raw_filters.get(year_field)
         if val is not None:
@@ -496,77 +660,27 @@ def parse_query_with_ai(user_query: str) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 result[year_field] = None
 
-    # Vote count preference
     vcp = raw_filters.get("vote_count_preference")
     result["vote_count_preference"] = vcp if vcp in _VALID_VOTE_COUNT_PREF else None
 
-    # --- Guardrails: parser kaçırdıysa sorgudan toparla ---
-    q_lower = user_query.lower()
+    result["reference_titles"] = _sanitize_reference_titles(raw_filters.get("reference_titles"))
 
-    # Komedi negation guardrail
-    if any(x in q_lower for x in ["komedi istemiyorum", "komedi olmasın", "komedi değil", "i don't want comedy", "no comedy"]):
-        if 35 not in result["exclude_genre_ids"]:
-            result["exclude_genre_ids"].append(35)
+    # Regex fallback her durumda çalışsın
+    result = _apply_regex_guardrails(user_query, result)
+    result = _final_cleanup(result)
 
-    # Korku negation guardrail
-    if any(x in q_lower for x in ["korku istemiyorum", "korku olmasın", "korku değil", "i don't want horror", "no horror"]):
-        if 27 not in result["exclude_genre_ids"]:
-            result["exclude_genre_ids"].append(27)
-
-    # Bilim kurgu negation guardrail
-    if any(x in q_lower for x in ["bilim kurgu olmasın", "bilim kurgu istemiyorum", "sci-fi olmasın", "science fiction olmasın", "no sci-fi", "not science fiction"]):
-        if 878 not in result["exclude_genre_ids"]:
-            result["exclude_genre_ids"].append(878)
-
-    # Psikolojik theme guardrail
-    if any(x in q_lower for x in ["psikolojik", "psychological"]):
-        if "psychological" not in result["theme"]:
-            result["theme"].append("psychological")
-
-    # "psikolojik" geçti diye sci-fi eklenmesin
-    if any(x in q_lower for x in ["psikolojik", "psychological"]):
-        if 878 in result["genre_ids"] and not any(y in q_lower for y in ["bilim kurgu", "sci-fi", "science fiction", "uzay"]):
-            result["genre_ids"] = [g for g in result["genre_ids"] if g != 878]
-
-    # "romantic" yanlışlıkla excluded_moods içine gittiyse genre exclusion'a taşı
-    if "romantic" in result["excluded_moods"]:
-        if 10749 not in result["exclude_genre_ids"]:
-            result["exclude_genre_ids"].append(10749)
-        result["excluded_moods"] = [m for m in result["excluded_moods"] if m != "romantic"]
-
-    # Açık genre kelimeleri sorguda varsa ve parser kaçırdıysa zorla ekle
-    if any(x in q_lower for x in ["gerilim", "gerilimli", "thriller", "suspense"]):
-        if 53 not in result["genre_ids"] and 53 not in result["exclude_genre_ids"]:
-            result["genre_ids"].append(53)
-
-    if any(x in q_lower for x in ["gizem", "gizemli", "mystery", "mysterious", "dedektif"]):
-        if 9648 not in result["genre_ids"] and 9648 not in result["exclude_genre_ids"]:
-            result["genre_ids"].append(9648)
-
-    if any(x in q_lower for x in ["romantik istemiyorum", "romantik olmasın", "romantik değil", "aşk filmi istemiyorum"]):
-        if 10749 not in result["exclude_genre_ids"]:
-            result["exclude_genre_ids"].append(10749)
-
-    result["theme"] = [t for t in result["theme"] if t in _VALID_THEMES]
-
-    # include/exclude çakışması varsa exclude kazansın
-    overlap = set(result["genre_ids"]) & set(result["exclude_genre_ids"])
-    if overlap:
-        result["genre_ids"] = [g for g in result["genre_ids"] if g not in overlap]
-
-    # --- Çağrı 2: DNA vektörü ---
     result["dna_query_vector"] = _call_dna_prompt(user_query)
 
     logger.info(
-        "Parser | genres=%s excl=%s mood=%s themes=%s "
-        "lang=%s country=%s lo_vi=%s hi_vi=%s "
-        "rating=%s runtime=%s year=[%s-%s] dna_dim=%d",
+        "Parser | genres=%s excl=%s mood=%s themes=%s lang=%s country=%s "
+        "lo_vi=%s hi_vi=%s rating=%s runtime=%s year=[%s-%s] refs=%s dna_dim=%d",
         result["genre_ids"], result["exclude_genre_ids"],
         result["mood"], result["theme"],
         result["original_language"], result["country"],
         result["low_violence"], result["high_violence"],
         result["rating_pref"], result["runtime_pref"],
         result["year_gte"], result["year_lte"],
+        result["reference_titles"],
         len(result["dna_query_vector"]),
     )
 

@@ -1,36 +1,38 @@
 """
-ml/ranker.py — CUE Hybrid Ranker v0.6.0
+ml/ranker.py — CUE Hybrid Ranker v0.6.4
 
 Scoring:
-  DNA varsa:  content*0.35 + collab*0.30 + tmdb*0.15 + dna*0.20
-  DNA yoksa:  content*0.45 + collab*0.40 + tmdb*0.15
+  DNA varsa:  content*0.47 + collab*0.20 + tmdb*0.10 + dna*0.15 + genre*0.08
+  DNA yoksa:  content*0.62 + collab*0.20 + tmdb*0.10 + genre*0.08
 
-v0.6.0 değişiklikleri:
-- dna_score: artık emotion_curve ortalaması DEĞİL,
-  ai_parser'ın ürettiği 16 boyutlu dna_query_vector ile film'in
-  dna_vector'ünün kosinüs benzerliğidir.
-- get_dna_score(candidate, query_vector) imzası güncellendi.
-- Supabase'e istek atılmaz; veriler candidate dict'ten okunur.
+v0.6.4 değişiklikleri:
+- DNA similarity hesabı ml.dna_scorer.dna_similarity() üzerinden yapılır.
+- Query vector yoksa / parse edilemezse DNA için norm fallback kaldırıldı.
+  Bu durumda dna_score=None döner.
+- Genre karşılaştırması daha güvenli hale getirildi (int normalize).
+- Ranker yalnızca parse + orchestration + hybrid scoring yapar.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
+
+from ml.dna_scorer import dna_similarity
 
 logger = logging.getLogger(__name__)
 
 _SVD_MIN = 0.5
 _SVD_MAX = 5.0
-
 DNA_VECTOR_DIM = 16
+
 
 # ---------------------------------------------------------------------------
 # Yardımcılar
 # ---------------------------------------------------------------------------
-
 
 def normalize_collab_score(raw_score: float) -> float:
     return max(0.0, min(1.0, (raw_score - _SVD_MIN) / (_SVD_MAX - _SVD_MIN)))
@@ -47,10 +49,27 @@ def _clamp(v: float) -> float:
     return max(0.0, min(1.0, v))
 
 
+def _normalize_genre_ids(values: Any) -> Set[int]:
+    if not isinstance(values, list):
+        return set()
+
+    result: Set[int] = set()
+    for item in values:
+        try:
+            result.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _parse_dna_vector(raw: Any) -> Optional[np.ndarray]:
     """
     Film ya da sorgu için 16 boyutlu DNA vektörünü numpy array'e çevirir.
-    Supabase'den ["0.05", "0.04", ...] formatında gelebilir.
+
+    Desteklenen girişler:
+    - np.ndarray
+    - list
+    - JSON string
     """
     if raw is None:
         return None
@@ -58,15 +77,21 @@ def _parse_dna_vector(raw: Any) -> Optional[np.ndarray]:
     try:
         if isinstance(raw, np.ndarray):
             arr = raw.astype(float)
+
         elif isinstance(raw, list):
             arr = np.array([float(str(x).strip()) for x in raw], dtype=float)
+
         elif isinstance(raw, str):
-            import json
-            arr = np.array(json.loads(raw), dtype=float)
+            stripped = raw.strip()
+            if not stripped:
+                return None
+            arr = np.array(json.loads(stripped), dtype=float)
+
         else:
             return None
 
         if len(arr) != DNA_VECTOR_DIM:
+            logger.debug("DNA vektör boyutu geçersiz: %s", len(arr))
             return None
 
         if np.all(arr == 0):
@@ -79,19 +104,9 @@ def _parse_dna_vector(raw: Any) -> Optional[np.ndarray]:
         return None
 
 
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """İki vektör arasındaki kosinüs benzerliği [0, 1]."""
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-    if norm_a < 1e-10 or norm_b < 1e-10:
-        return 0.0
-    return float(np.clip(np.dot(a, b) / (norm_a * norm_b), 0.0, 1.0))
-
-
 # ---------------------------------------------------------------------------
 # HybridRanker
 # ---------------------------------------------------------------------------
-
 
 class HybridRanker:
     """
@@ -100,15 +115,17 @@ class HybridRanker:
     Beklenen aday formatı:
     {
         "content_score":       float,   # [0, 1]
-        "collaborative_score": float,   # [0, 1]
+        "collaborative_score": float,   # [0, 1] — main.py tarafından hesaplanmış
         "tmdb_score":          float,   # weighted TMDB score, [0, 10]
         "genre_ids":           list,    # film genre id listesi
-        "dna_vector":          list | None,
-        "emotion_curve":       list | None,
+        "dna_vector":          list | str | np.ndarray | None,
     }
 
-    query_vector: ai_parser'dan gelen 16 boyutlu dna_query_vector
-    filters: parsed_filters
+    query_vector:
+        ai_parser'dan gelen 16 boyutlu dna_query_vector
+
+    filters:
+        parsed_filters (normalize_filters sonrası)
     """
 
     def normalize_tmdb_score(self, v: Any) -> float:
@@ -131,22 +148,20 @@ class HybridRanker:
         if not filters:
             return 0.5
 
-        candidate_genres = candidate.get("genre_ids") or []
-        if not isinstance(candidate_genres, list):
+        candidate_genres = _normalize_genre_ids(candidate.get("genre_ids") or [])
+        if not candidate_genres:
             return 0.5
 
-        include_genres = filters.get("genre_ids") or []
-        exclude_genres = filters.get("exclude_genre_ids") or []
+        include_genres = _normalize_genre_ids(filters.get("genre_ids") or [])
+        exclude_genres = _normalize_genre_ids(filters.get("exclude_genre_ids") or [])
 
-        # Exclude türlerden biri varsa ağır ceza
-        if any(g in candidate_genres for g in exclude_genres):
+        if candidate_genres & exclude_genres:
             return 0.0
 
-        # Include genre yoksa nötr
         if not include_genres:
             return 0.5
 
-        match_count = sum(1 for g in include_genres if g in candidate_genres)
+        match_count = len(candidate_genres & include_genres)
         match_ratio = match_count / len(include_genres)
 
         if match_count == 0:
@@ -162,42 +177,35 @@ class HybridRanker:
         """
         DNA skoru hesaplama stratejisi:
 
-        1. film dna_vector + query_vector -> cosine similarity
-        2. film dna_vector var, query yok -> vektör norm tabanlı fallback
-        3. emotion_curve varsa            -> normalize edilmiş ortalama
-        4. yoksa                          -> None
+        1. film dna_vector + query_vector varsa
+           -> ml.dna_scorer.dna_similarity() ile cosine similarity
+
+        2. query_vector yoksa / parse edilemezse
+           -> None
+
+        3. film dna_vector yoksa
+           -> None
         """
         raw_film_dna = candidate.get("dna_vector")
         film_vec = _parse_dna_vector(raw_film_dna)
 
-        if film_vec is not None:
-            if query_vector is not None:
-                query_vec = _parse_dna_vector(query_vector)
-                if query_vec is not None:
-                    score = _cosine_similarity(film_vec, query_vec)
-                    logger.debug("DNA cos_sim: %.4f", score)
-                    return _clamp(score)
+        if film_vec is None:
+            return None
 
-            norm = float(np.linalg.norm(film_vec))
-            max_norm = (DNA_VECTOR_DIM ** 0.5) * 0.09
-            return _clamp(norm / max_norm if max_norm > 0 else 0.0)
+        if query_vector is None:
+            return None
 
-        raw_curve = candidate.get("emotion_curve")
-        if not isinstance(raw_curve, list) or len(raw_curve) == 0:
+        query_vec = _parse_dna_vector(query_vector)
+        if query_vec is None:
             return None
 
         try:
-            values = [float(v) for v in raw_curve]
-            if all(v == 0.0 for v in values):
-                return None
-            avg = sum(values) / len(values)
-            max_val = max(values)
-            if max_val > 0:
-                return _clamp(avg / max_val)
-        except (TypeError, ValueError):
-            pass
-
-        return None
+            score = float(dna_similarity(film_vec, query_vec))
+            logger.debug("DNA similarity: %.4f", score)
+            return _clamp(score)
+        except Exception as exc:
+            logger.debug("dna_similarity çağrısı başarısız: %s", exc)
+            return None
 
     def compute_hybrid_score(
         self,
@@ -208,33 +216,30 @@ class HybridRanker:
         genre_match_score: Optional[Any] = None,
     ) -> float:
         """
-        Yeni ağırlık mantığı:
-        - content daha baskın
-        - genre uyumu ayrı bir sinyal
-        - collab biraz düşürüldü
-        - tmdb hafif destek
+        DNA varsa:  content*0.47 + collab*0.20 + tmdb*0.10 + dna*0.15 + genre*0.08
+        DNA yoksa:  content*0.62 + collab*0.20 + tmdb*0.10 + genre*0.08
         """
         content = _clamp(_safe_float(content_score))
-        collab  = _clamp(_safe_float(collaborative_score))
-        tmdb    = self.normalize_tmdb_score(tmdb_score)
-        genre   = _clamp(_safe_float(genre_match_score, 0.5))
+        collab = _clamp(_safe_float(collaborative_score))
+        tmdb = self.normalize_tmdb_score(tmdb_score)
+        genre = _clamp(_safe_float(genre_match_score, 0.5))
 
         if dna_score is not None:
             dna = _clamp(_safe_float(dna_score))
             return round(
-                content * 0.45 +
+                content * 0.47 +
                 collab  * 0.20 +
                 tmdb    * 0.10 +
-                dna     * 0.10 +
-                genre   * 0.15,
+                dna     * 0.15 +
+                genre   * 0.08,
                 6,
             )
 
         return round(
-            content * 0.55 +
+            content * 0.62 +
             collab  * 0.20 +
             tmdb    * 0.10 +
-            genre   * 0.15,
+            genre   * 0.08,
             6,
         )
 
@@ -291,43 +296,3 @@ def rank_candidates(
         query_vector=query_vector,
         filters=filters,
     )
-
-
-# ---------------------------------------------------------------------------
-# Pipeline köprüsü
-# ---------------------------------------------------------------------------
-
-def build_pipeline_candidates(
-    content_results: List[Dict[str, Any]],
-    user_id: Any,
-    lite_model: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    if not content_results:
-        return []
-
-    tmdb_ids = [int(r["id"]) for r in content_results if r.get("id") is not None]
-    collab_scores: Dict[int, float] = {}
-
-    if lite_model is not None and user_id is not None and tmdb_ids:
-        try:
-            from ml.collaborative_lite import collab_score_by_tmdb_ids
-            raw = collab_score_by_tmdb_ids(
-                user_id=user_id, tmdb_ids=tmdb_ids, lite_model=lite_model
-            )
-            collab_scores = {tid: normalize_collab_score(s) for tid, s in raw.items()}
-        except Exception as exc:
-            logger.warning("SVD skor alımı başarısız: %s", exc)
-
-    gm = float(lite_model["global_mean"]) if lite_model else 3.0
-    default_c = normalize_collab_score(gm)
-
-    return [
-        {
-            **r,
-            "tmdb_id":             int(r["id"]) if r.get("id") is not None else None,
-            "content_score":       float(r.get("content_score") or 0.0),
-            "collaborative_score": collab_scores.get(int(r["id"]) if r.get("id") else 0, default_c),
-            "tmdb_score":          float(r.get("tmdb_score") or 0.0),
-        }
-        for r in content_results
-    ]
