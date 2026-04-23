@@ -3,7 +3,6 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
-models/
 data/movielens/
 data/clean_ratings.csv
 tmp/
@@ -11,8 +10,6 @@ tmp/
 frontend/node_modules/
 frontend/.env
 *.webm
-<<<<<<< HEAD
-
 .env
 frontend/.env
 backend/.env
@@ -20,6 +17,4 @@ cookies.txt
 *.xlsx
 **/*.xlsx
 backend/backup/
-=======
-backend/backup
->>>>>>> 4a4c314 (Update tmdb_client and gitignore)
+
