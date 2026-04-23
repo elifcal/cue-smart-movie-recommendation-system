@@ -18,3 +18,7 @@ backend/.env
 cookies.txt
 *.xlsx
 **/*.xlsx
+backend/analysis/errors.log
+backend/precompute/errors.log
+backend/precompute/islenen_filmler.json
+*.part
