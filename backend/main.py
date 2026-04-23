@@ -76,7 +76,8 @@ async def startup_event():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://cue-smart-movie-recommendation-syst-orpin.vercel.app",
+        "https://cue-smart-movie-recommendation-system-6dffii5ej.vercel.app",
+        "https://cue-smart-movie-recommendation-syst.vercel.app"
         "http://localhost:3000",
         "http://localhost:5173",
     ],
