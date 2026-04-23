@@ -87,6 +87,7 @@ app.add_middleware(
     allow_origins=[
         "https://cue-smart-movie-recommendation-system-6dffii5ej.vercel.app",
         "https://cue-smart-movie-recommendation-syst.vercel.app",
+        "https://cue-smart-movie-recommendation-syst-orpin.vercel.app",
         "http://localhost:3000",
         "http://localhost:5173",
     ],
