@@ -5,6 +5,14 @@ import yt_dlp
 import whisper
 import librosa
 import numpy as np
+import logging
+
+
+logging.basicConfig(
+    filename="errors.log",
+    level=logging.ERROR,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 def ffmpeg_ayarla():
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -42,7 +50,11 @@ def ses_indir(youtube_key, cikti_klasor="./temp_audio"):
     try:
         with yt_dlp.YoutubeDL(secenekler) as ydl:
             ydl.download([url])
-    except Exception as e:
+    except yt_dlp.utils.DownloadError as e:
+        logging.error(f"İndirme hatası: {e}")
+        print(f"⚠️ İndirme kritik hata: {e}")
+    except Exception as e:                            # ← eskisi, korundu
+        logging.error(f"İndirme beklenmedik hata: {e}")
         print(f"⚠️ İndirme kritik hata: {e}")
 
     mp3_yolu = os.path.join(cikti_klasor, f"{youtube_key}.mp3")
@@ -53,14 +65,24 @@ def analyze_audio(mp3_yolu, model, sure=60, language=None):
         return None
 
     print(f"🎙 Analiz ediliyor: {mp3_yolu}")
-    sonuc = model.transcribe(mp3_yolu, verbose=False, language=language)
+    try:
+        sonuc = model.transcribe(mp3_yolu, verbose=False, language=language)
+    except FileNotFoundError as e:
+        logging.error(f"Whisper - Dosya bulunamadı: {e}")
+        print(f"⚠️ Whisper hatası: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Whisper beklenmedik hata: {e}")
+        print(f"⚠️ Whisper hatası: {e}")
+        return None
+
     text = sonuc["text"]
     algilanan_dil = sonuc.get("language")
     dil_uyumsuzlugu = None
     if language and algilanan_dil and algilanan_dil != language:
-     uyari = f"Dil uyuşmazlığı: TMDB={language}, Whisper={algilanan_dil}"
-     print(f"⚠️  {uyari}")
-     dil_uyumsuzlugu = uyari
+        uyari = f"Dil uyuşmazlığı: TMDB={language}, Whisper={algilanan_dil}"
+        print(f"⚠️  {uyari}")
+        dil_uyumsuzlugu = uyari
     segmentler = sonuc.get("segments", [])
 
     y, sr = librosa.load(mp3_yolu, duration=sure)
@@ -71,11 +93,13 @@ def analyze_audio(mp3_yolu, model, sure=60, language=None):
     emotion_curve = [float(np.mean(librosa.feature.rms(y=p))) for p in parcalar]
 
     if segmentler:
-     toplam_sure = sure  # segmentler[-1]["end"] yerine sabit sure
-     konusma_suresi = sum(s["end"] - s["start"] for s in segmentler)
-     speech_ratio = round(min(konusma_suresi / toplam_sure, 1.0), 3)
+        toplam_sure = sure
+        konusma_suresi = sum(s["end"] - s["start"] for s in segmentler)
+        speech_ratio = round(min(konusma_suresi / toplam_sure, 1.0), 3)
     else:
         speech_ratio = 0.0
+
+
 
     return {
         "text": text,
