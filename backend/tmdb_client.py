@@ -100,8 +100,4 @@ def prepare_person_b_json(limit=100):
 if __name__ == "__main__":
 #  JSON'u hazırla
 #prepare_person_b_json(limit=100)
-<<<<<<< HEAD
  pass
-=======
-    pass
->>>>>>> 4a4c314 (Update tmdb_client and gitignore)
