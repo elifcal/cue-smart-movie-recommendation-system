@@ -67,6 +67,15 @@ except Exception as exc:
 
 app = FastAPI(title="Cue API", version="0.8.0")
 
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "Cue API is running",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("FastAPI başlatılıyor... Precomputed Index belleğe alınıyor.")
