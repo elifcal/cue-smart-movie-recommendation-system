@@ -440,13 +440,62 @@ def parse_credits(credits: Any, include_credits: bool = False) -> str:
     return " ".join(values)
 
 
+def extract_director_names(credits: Any) -> List[str]:
+    """Credits alanından yönetmen isimlerini frontend için güvenli şekilde çıkarır."""
+    if credits is None:
+        return []
+
+    if isinstance(credits, str):
+        stripped = credits.strip()
+        if not stripped:
+            return []
+        try:
+            import json
+            credits = json.loads(stripped)
+        except Exception:
+            return []
+
+    if not isinstance(credits, dict):
+        return []
+
+    directors: List[str] = []
+
+    # Projedeki beklenen yapı: {"directors": [{"name": "..."}]}
+    director_items = credits.get("directors", [])
+    if isinstance(director_items, list):
+        for person in director_items:
+            if isinstance(person, dict):
+                name = clean_text(person.get("name", ""))
+                if name:
+                    directors.append(name)
+
+    # TMDB standart yapı fallback'i: {"crew": [{"job": "Director", "name": "..."}]}
+    crew_items = credits.get("crew", [])
+    if isinstance(crew_items, list):
+        for person in crew_items:
+            if not isinstance(person, dict):
+                continue
+            job = clean_text_lower(person.get("job", ""))
+            department = clean_text_lower(person.get("department", ""))
+            name = clean_text(person.get("name", ""))
+            if name and (job == "director" or department == "directing"):
+                directors.append(name)
+
+    return list(dict.fromkeys(directors))
+
+
 # ---------------------------------------------------------------------------
 # TF-IDF için metin seçimi
 # ---------------------------------------------------------------------------
 
 def _pick_title(row: Dict[str, Any]) -> str:
     return clean_text_lower(
-        row.get("title") or row.get("original_title") or row.get("english_title") or ""
+        row.get("turkish_title")
+        or row.get("title_tr")
+        or row.get("title")
+        or row.get("original_title")
+        or row.get("english_title")
+        or ""
     )
 
 
@@ -524,13 +573,15 @@ def prepare_df(
 
     if df.empty:
         return pd.DataFrame(columns=[
-            "tmdb_id", "title", "original_title", "overview_tr",
+            "tmdb_id", "title", "title_tr", "turkish_title",
+            "original_title", "overview_tr",
             "tagline_tr", "genres_str", "keywords_str", "combined",
         ])
 
     defaults: Dict[str, Any] = {
         "tmdb_id": None, "id": None, "imdb_id": None,
-        "title": "", "english_title": "", "original_title": "",
+        "title": "", "title_tr": "", "turkish_title": "",
+        "english_title": "", "original_title": "",
         "overview": "", "overview_tr": "", "tagline": "", "tagline_tr": "",
         "genres": None, "genre_ids": None, "keywords": None, "keywords_tr": None,
         "vote_average": 0.0, "vote_count": 0, "popularity": 0.0,
@@ -544,7 +595,7 @@ def prepare_df(
         if col not in df.columns:
             df[col] = default
 
-    text_cols = ["title", "english_title", "original_title",
+    text_cols = ["title", "title_tr", "turkish_title", "english_title", "original_title",
                  "overview", "overview_tr", "tagline", "tagline_tr"]
     for col in text_cols:
         df[col] = df[col].apply(clean_text)
@@ -860,6 +911,8 @@ def query_precomputed_index(
             "tmdb_id":          row.get("tmdb_id") or row.get("id"),
             "imdb_id":          row.get("imdb_id"),
             "title":            row.get("title", ""),
+            "title_tr":         row.get("title_tr", ""),
+            "turkish_title":    row.get("turkish_title", "") or row.get("title_tr", "") or row.get("title", ""),
             "english_title":    row.get("english_title", ""),
             "original_title":   row.get("original_title", ""),
             "overview":         row.get("overview", ""),
@@ -881,6 +934,8 @@ def query_precomputed_index(
             "keywords":         _safe_list(row.get("keywords")),
             "keywords_tr":      _safe_list(row.get("keywords_tr")),
             "production_countries": _safe_list(row.get("production_countries")),
+            "directors":        extract_director_names(row.get("credits")),
+            "director_names":   ", ".join(extract_director_names(row.get("credits"))),
             "credits":          _safe_dict(row.get("credits")),
             "dna_vector":       None,
             "emotion_curve":    None,
@@ -955,6 +1010,8 @@ def rank_movies(
             "tmdb_id":          row.get("tmdb_id") or row.get("id"),
             "imdb_id":          row.get("imdb_id"),
             "title":            row.get("title", ""),
+            "title_tr":         row.get("title_tr", ""),
+            "turkish_title":    row.get("turkish_title", "") or row.get("title_tr", "") or row.get("title", ""),
             "english_title":    row.get("english_title", ""),
             "original_title":   row.get("original_title", ""),
             "overview":         row.get("overview", ""),
@@ -976,6 +1033,8 @@ def rank_movies(
             "keywords":         _sl(row.get("keywords")),
             "keywords_tr":      _sl(row.get("keywords_tr")),
             "production_countries": _sl(row.get("production_countries")),
+            "directors":        extract_director_names(row.get("credits")),
+            "director_names":   ", ".join(extract_director_names(row.get("credits"))),
             "credits":          _sd(row.get("credits")),
             "dna_vector":       row.get("dna_vector"),
             "emotion_curve":    row.get("emotion_curve"),

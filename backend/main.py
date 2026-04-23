@@ -182,6 +182,49 @@ def format_runtime(runtime: Any) -> Optional[str]:
         return None
 
 
+def extract_directors(credits: Any) -> List[str]:
+    """Film credits alanından yönetmen isimlerini güvenli şekilde çıkarır."""
+    if credits is None:
+        return []
+
+    if isinstance(credits, str):
+        stripped = credits.strip()
+        if not stripped:
+            return []
+        try:
+            credits = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return []
+
+    if not isinstance(credits, dict):
+        return []
+
+    directors: List[str] = []
+
+    # Projedeki mevcut credits formatı: {"directors": [{"name": ...}]}
+    director_items = credits.get("directors", []) or []
+    if isinstance(director_items, list):
+        for person in director_items:
+            if isinstance(person, dict):
+                name = person.get("name")
+                if name:
+                    directors.append(str(name).strip())
+
+    # TMDB standart credits formatı: {"crew": [{"job": "Director", "name": ...}]}
+    crew_items = credits.get("crew", []) or []
+    if isinstance(crew_items, list):
+        for person in crew_items:
+            if not isinstance(person, dict):
+                continue
+            job = str(person.get("job") or "").lower()
+            department = str(person.get("department") or "").lower()
+            name = person.get("name")
+            if name and (job == "director" or department == "directing"):
+                directors.append(str(name).strip())
+
+    return list(dict.fromkeys([d for d in directors if d]))
+
+
 def _parse_dna_field(raw: Any) -> Any:
     if raw is None:
         return None
@@ -354,14 +397,24 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
     film_id = film.get("movie_id") or film.get("id")
     original_lang = film.get("original_language", "")
 
+    turkish_title = (
+        film.get("turkish_title")
+        or film.get("title_tr")
+        or film.get("title")
+        or ""
+    )
+
     if original_lang == "tr":
-        display_title = film.get("original_title") or film.get("title", "")
+        display_title = turkish_title or film.get("original_title", "")
     else:
         display_title = (
-            film.get("english_title")
+            turkish_title
+            or film.get("english_title")
             or film.get("original_title")
             or film.get("title", "")
         )
+
+    directors = extract_directors(film.get("credits"))
 
     if original_lang == "tr":
         overview_display = film.get("overview", "")
@@ -433,7 +486,11 @@ def enrich_for_display(film: Dict[str, Any], why_text: str) -> Dict[str, Any]:
         "imdb_id": imdb_id,
         "original_title": film.get("original_title", ""),
         "english_title": film.get("english_title", ""),
+        "turkish_title": turkish_title,
+        "title_tr": film.get("title_tr", ""),
         "display_title": display_title,
+        "directors": directors,
+        "director_names": ", ".join(directors),
         "overview_display": overview_display,
         "tagline_display": tagline_display,
         "genres_tr": genres_tr,
