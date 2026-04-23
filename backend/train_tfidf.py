@@ -229,6 +229,45 @@ def parse_credits(credits: Any) -> str:
 
     return " ".join(values)
 
+def extract_directors(credits: Any) -> List[str]:
+    """credits alanından yönetmen isimlerini frontend için ayrı liste olarak çıkarır."""
+    if credits is None:
+        return []
+
+    if isinstance(credits, str):
+        stripped = credits.strip()
+        if not stripped:
+            return []
+        try:
+            credits = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            return []
+
+    if not isinstance(credits, dict):
+        return []
+
+    directors: List[str] = []
+
+    director_items = credits.get("directors", [])
+    if isinstance(director_items, list):
+        for person in director_items:
+            if isinstance(person, dict):
+                name = clean_text(person.get("name", ""))
+                if name:
+                    directors.append(name)
+
+    crew_items = credits.get("crew", [])
+    if isinstance(crew_items, list):
+        for person in crew_items:
+            if not isinstance(person, dict):
+                continue
+            job = clean_text_lower(person.get("job", ""))
+            name = clean_text(person.get("name", ""))
+            if job == "director" and name:
+                directors.append(name)
+
+    return list(dict.fromkeys(directors))
+
 def pick_title(row: Dict[str, Any]) -> str:
     return clean_text_lower(
         row.get("title") or row.get("original_title") or row.get("english_title") or ""
@@ -329,6 +368,17 @@ def build_precomputed_df(movies_list: List[Dict[str, Any]]) -> pd.DataFrame:
 
     df["tmdb_id"] = pd.to_numeric(df.get("tmdb_id", None), errors="coerce")
 
+    # Supabase'de Türkçe başlık `title` kolonunda tutuluyor.
+    # Frontend/backend uyumluluğu için açık alias kolonları üretiyoruz.
+    df["turkish_title"] = df["title"].apply(clean_text)
+    df["title_tr"] = df["title"].apply(clean_text)
+
+    # Yönetmen isimlerini response'a ayrı alan olarak taşıyabilmek için meta'ya ekliyoruz.
+    df["directors"] = df["credits"].apply(extract_directors)
+    df["director_names"] = df["directors"].apply(
+        lambda names: ", ".join(names) if isinstance(names, list) else ""
+    )
+
     df["title_for_tfidf"]    = df.apply(lambda r: pick_title(r.to_dict()),    axis=1)
     df["overview_for_tfidf"] = df.apply(lambda r: pick_overview(r.to_dict()), axis=1)
     df["tagline_for_tfidf"]  = df.apply(lambda r: pick_tagline(r.to_dict()),  axis=1)
@@ -421,14 +471,15 @@ def main():
     vectorizer, tfidf_matrix = build_global_tfidf(precomputed_df)
 
     SAVE_COLS = [
-        "tmdb_id", "imdb_id", "title", "english_title", "original_title",
+        "tmdb_id", "imdb_id", "title", "turkish_title", "title_tr",
+        "english_title", "original_title",
         "overview", "overview_tr", "tagline", "tagline_tr",
         "genres", "genre_ids", "keywords", "keywords_tr",
         "vote_average", "vote_count", "popularity",
         "poster_path", "videos", "release_date", "runtime",
         "original_language", "credits", "production_countries",
         "genres_str", "keywords_str", "countries_str", "country_codes",
-        "credits_str",
+        "credits_str", "directors", "director_names",
         "combined",
     ]
 
