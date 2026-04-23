@@ -18,3 +18,4 @@ backend/.env
 cookies.txt
 *.xlsx
 **/*.xlsx
+backend/backup/
