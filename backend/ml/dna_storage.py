@@ -8,12 +8,14 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from ml.dna_scorer import dna_vector  # ✅ doğru yer
-# ENV
+from ml.dna_scorer import dna_vector
+from precompute.subtitle_emotion import fused_emotion_curve
+
 load_dotenv()
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 def save_dna_to_supabase(
     tmdb_id: int,
     ses_verisi: Dict[str, Any],
@@ -26,12 +28,12 @@ def save_dna_to_supabase(
     Film DNA verisini kaydeder (UPSERT)
     """
     try:
-        # 🧬 DNA üret
-        vektor = dna_vector(ses_verisi, gorsel_verisi)
-        # ⏱ timestamp
+        emotion_curve = fused_emotion_curve(tmdb_id)
+        vektor = dna_vector(ses_verisi, gorsel_verisi, emotion_curve)
+
         if analyzed_at is None:
             analyzed_at = datetime.utcnow().isoformat()
-        # 📦 kayıt
+
         data = {
             "tmdb_id": tmdb_id,
             "title": title,
@@ -39,21 +41,23 @@ def save_dna_to_supabase(
             "tempo": ses_verisi.get("tempo"),
             "energy": ses_verisi.get("energy"),
             "speech_ratio": ses_verisi.get("speech_ratio"),
-            "emotion_curve": ses_verisi.get("emotion_curve"),
+            "emotion_curve": emotion_curve,
             "brightness": gorsel_verisi.get("brightness"),
             "saturation": gorsel_verisi.get("saturation"),
             "warmth": gorsel_verisi.get("warmth"),
-            "dna_vector": vektor.tolist(),  # 🔥 KRİTİK
+            "dna_vector": vektor.tolist(),
             "analyzed_at": analyzed_at,
         }
-        # None temizle
+
         data = {k: v for k, v in data.items() if v is not None}
+
         response = (
             supabase
             .table("film_dna")
             .upsert(data, on_conflict="tmdb_id")
             .execute()
         )
+
         if response.data:
             print(f"✅ Kaydedildi: {tmdb_id}")
             return response.data[0]
