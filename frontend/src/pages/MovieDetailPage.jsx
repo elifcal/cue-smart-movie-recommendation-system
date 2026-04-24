@@ -204,6 +204,27 @@ function MovieDetailPage() {
           ) || null;
 
         if (matchedMovie) {
+          const normalizedOverview =
+            matchedMovie.overview_display ??
+            matchedMovie.overview_tr ??
+            matchedMovie.overview ??
+            matchedMovie.tagline_display ??
+            matchedMovie.tagline_tr ??
+            matchedMovie.tagline ??
+            "";
+
+          const normalizedOverviewTr =
+            matchedMovie.overview_display ??
+            matchedMovie.overview_tr ??
+            matchedMovie.overview ??
+            "";
+
+          const normalizedTaglineTr =
+            matchedMovie.tagline_display ??
+            matchedMovie.tagline_tr ??
+            matchedMovie.tagline ??
+            "";
+
           setMovie({
             ...matchedMovie,
             tmdb_id:
@@ -216,6 +237,9 @@ function MovieDetailPage() {
               : matchedMovie.poster_path
                 ? `${TMDB_IMAGE_BASE_URL}${matchedMovie.poster_path}`
                 : "",
+            overview: normalizedOverview,
+            overview_tr: normalizedOverviewTr,
+            tagline_tr: normalizedTaglineTr,
             why_text: matchedMovie.why_text ?? matchedMovie.whyText ?? "",
             emotion_curve:
               matchedMovie.emotion_curve ??
@@ -322,8 +346,12 @@ function MovieDetailPage() {
 
   const displayOverview = useMemo(() => {
     return (
+      movie?.overview_display?.trim() ||
       movie?.overview_tr?.trim() ||
       movie?.overview?.trim() ||
+      movie?.tagline_display?.trim() ||
+      movie?.tagline_tr?.trim() ||
+      movie?.tagline?.trim() ||
       "Bu film için açıklama bilgisi bulunamadı."
     );
   }, [movie]);
