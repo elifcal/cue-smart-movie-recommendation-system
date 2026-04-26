@@ -25,15 +25,17 @@ A system that understands feelings, not just films.
 ![CUE Homepage](assets/screenshots/homepage.png)
 
 ### Natural Language Search Example
-> *"A 90s horror film with little blood and a twist ending"*
+> *"I want to watch a dark, slow-paced but psychologically intense movie."*
 
 ![Search Example](assets/screenshots/search-example.png)
 
+![Search Example](assets/screenshots/search_movies.png)
+
 ### System Flow Diagram
-![Flow Diagram](assets/screenshots/flow-diagram.png)
+![Flow Diagram](assets/screenshots/flow_diagram.png)
 
 ### Key Metrics
-![Metrics](assets/screenshots/metrics.png)
+![Metrics](assets/screenshots/metrics_cue.png)
 
 ---
 
